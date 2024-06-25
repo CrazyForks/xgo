@@ -1,96 +1,66 @@
 package main
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/xhd2015/xgo/script/build-release/revision"
 	"github.com/xhd2015/xgo/support/cmd"
-	"github.com/xhd2015/xgo/support/fileutil"
 )
 
 // fixup src dir to prepare for release build
-func fixupSrcDir(targetDir string, rev string) error {
-	err := switchRelease(targetDir)
+func fixupSrcDir(targetDir string, rev string) (restore func() error, err error) {
+	restore, err = updateRevisions(targetDir, false, rev)
 	if err != nil {
-		return err
+		return restore, err
 	}
-	err = embedPatchCompiler(targetDir)
-	if err != nil {
-		return err
-	}
-	err = updateRevisions(targetDir, false, rev)
-	if err != nil {
-		return err
-	}
-	return nil
+	return restore, nil
 }
 
-func switchRelease(targetDir string) error {
-	devFile := filepath.Join(targetDir, "cmd", "xgo", "env_dev.go")
-	err := fileutil.Patch(devFile, func(data []byte) ([]byte, error) {
-		content := string(data)
-		content = "//go:build ignore\n" + content
-		return []byte(content), nil
-	})
+func stageFile(file string) (restore func() error, err error) {
+	content, err := os.ReadFile(file)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	releaseFile := filepath.Join(targetDir, "cmd", "xgo", "env_release.go")
-	err = fileutil.Patch(releaseFile, func(data []byte) ([]byte, error) {
-		buildIgnore := "//go:build ignore"
-		content := string(data)
-		idx := strings.Index(content, buildIgnore)
-		if idx < 0 {
-			fmt.Printf("content: %s\n", content)
-			return nil, fmt.Errorf("missing %s in %s", buildIgnore, releaseFile)
-		}
-		content = strings.ReplaceAll(content, buildIgnore, "")
-		return []byte(content), nil
-	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return func() error {
+		return os.WriteFile(file, content, 0755)
+	}, nil
 }
 
-func embedPatchCompiler(targetDir string) error {
-	patchCompiler := filepath.Join(targetDir, "cmd", "xgo", "patch_compiler")
-	err := os.Rename(filepath.Join(targetDir, "patch"), patchCompiler)
-	if err != nil {
-		return err
-	}
-	err = os.Rename(filepath.Join(patchCompiler, "go.mod"), filepath.Join(patchCompiler, "go.mod.txt"))
-	if err != nil {
-		return err
-	}
-	err = os.Rename(filepath.Join(targetDir, "runtime", "trap_runtime"), filepath.Join(patchCompiler, "trap_runtime"))
-	if err != nil {
-		return err
-	}
-	return nil
-}
-func updateRevisions(targetDir string, unlink bool, rev string) error {
+// NOTE: only commit is updated, version number not touched
+func updateRevisions(targetDir string, unlink bool, rev string) (restore func() error, err error) {
 	// unlink files because all files are symlink
 	files := revision.GetVersionFiles(targetDir)
+	var restoreFiles []func() error
+	for _, file := range files {
+		r, err := stageFile(file)
+		if err != nil {
+			return nil, err
+		}
+		restoreFiles = append(restoreFiles, r)
+	}
+	restore = func() error {
+		for _, r := range restoreFiles {
+			r()
+		}
+		return nil
+	}
 	if unlink {
 		for _, file := range files {
 			err := unlinkFile(file)
 			if err != nil {
-				return err
+				return restore, err
 			}
 		}
 	}
 
 	for _, file := range files {
-		err := revision.PatchVersionFile(file, rev, false)
+		err := revision.PatchVersionFile(file, "", rev, false, -1)
 		if err != nil {
-			return err
+			return restore, err
 		}
 	}
-	return nil
+	return restore, nil
 }
 
 func gitListWorkingTreeChangedFiles(dir string) ([]string, error) {
@@ -98,7 +68,7 @@ func gitListWorkingTreeChangedFiles(dir string) ([]string, error) {
 	//   -c cached
 	//   -d deleted
 	//   -m modified
-	//   -o untrached files
+	//   -o untracked files
 	//   --exclude-standard apply ignore rules
 	//
 	// example:
@@ -110,9 +80,6 @@ func gitListWorkingTreeChangedFiles(dir string) ([]string, error) {
 		return nil, err
 	}
 	return splitLinesFilterEmpty(output), nil
-}
-func getGitDir() (string, error) {
-	return cmd.Output("git", "rev-parse", "--git-dir")
 }
 
 func splitLinesFilterEmpty(s string) []string {

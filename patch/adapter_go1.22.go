@@ -18,7 +18,7 @@ const goMajor = 1
 const goMinor = 22
 
 const genericTrapNeedsWorkaround = true
-const closureMayBeEleminatedDueToIfConst = false
+const closureMayBeEliminatedDueToIfConst = false
 
 func forEachFunc(callback func(fn *ir.Func) bool) {
 	for _, fn := range typecheck.Target.Funcs {
@@ -65,19 +65,19 @@ func takeAddrs(fn *ir.Func, t []*types.Field, nameOnly bool) ir.Expr {
 }
 
 // NOTE: []*types.Field instead of *types.Type(go1.21)
-func getFieldNames(fn *ir.Func, t []*types.Field) ir.Expr {
+func getFieldNames(pos src.XPos, fn *ir.Func, t []*types.Field) ir.Expr {
 	if len(t) == 0 {
-		return NewNilExpr(fn.Pos(), strSlice)
+		return NewNilExpr(pos, strSlice)
 	}
 	paramList := make([]ir.Node, len(t))
 	i := 0
 	ForEachField(t, func(field *types.Field) bool {
 		fieldName := getFieldName(fn, field)
-		paramList[i] = NewStringLit(fn.Pos(), fieldName)
+		paramList[i] = NewStringLit(pos, fieldName)
 		i++
 		return true
 	})
-	return ir.NewCompLitExpr(fn.Pos(), ir.OCOMPLIT, strSlice, paramList)
+	return ir.NewCompLitExpr(pos, ir.OCOMPLIT, strSlice, paramList)
 }
 
 func getTypeNames(params []*types.Field) []ir.Node {

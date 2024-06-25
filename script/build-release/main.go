@@ -12,6 +12,7 @@ import (
 	"github.com/xhd2015/xgo/script/build-release/revision"
 	"github.com/xhd2015/xgo/support/cmd"
 	"github.com/xhd2015/xgo/support/filecopy"
+	"github.com/xhd2015/xgo/support/git"
 	"github.com/xhd2015/xgo/support/goinfo"
 	"github.com/xhd2015/xgo/support/osinfo"
 )
@@ -108,11 +109,7 @@ func buildRelease(releaseDirName string, installLocal bool, localName string, de
 		extraBuildFlags = append(extraBuildFlags, "-trimpath")
 	}
 
-	gitDir, err := getGitDir()
-	if err != nil {
-		return err
-	}
-	projectRoot, err := filepath.Abs(filepath.Dir(gitDir))
+	projectRoot, err := git.ShowTopLevel("")
 	if err != nil {
 		return err
 	}
@@ -136,18 +133,21 @@ func buildRelease(releaseDirName string, installLocal bool, localName string, de
 		fmt.Printf("%s\n", tmpDir)
 	}
 
-	tmpSrcDir := filepath.Join(tmpDir, "src")
-	// use git worktree to prepare the directory for building
-	// add a worktree detached at HEAD
-	err = cmd.Dir(projectRoot).Run("git", "worktree", "add", "--detach", tmpSrcDir, "HEAD")
-	if err != nil {
-		return err
-	}
-	// --force: delete files even there is untracked content
-	if !debug {
-		defer cmd.Dir(projectRoot).Run("git", "worktree", "remove", "--force", tmpSrcDir)
-	} else {
-		fmt.Printf("git worktree remove --force %s\n", tmpSrcDir)
+	tmpSrcDir := projectRoot
+	if false {
+		tmpSrcDir := filepath.Join(tmpDir, "src")
+		// use git worktree to prepare the directory for building
+		// add a worktree detached at HEAD
+		err = cmd.Dir(projectRoot).Run("git", "worktree", "add", "--detach", tmpSrcDir, "HEAD")
+		if err != nil {
+			return err
+		}
+		// --force: delete files even there is untracked content
+		if !debug {
+			defer cmd.Dir(projectRoot).Run("git", "worktree", "remove", "--force", tmpSrcDir)
+		} else {
+			fmt.Printf("git worktree remove --force %s\n", tmpSrcDir)
+		}
 	}
 
 	// copy modified files
@@ -155,10 +155,12 @@ func buildRelease(releaseDirName string, installLocal bool, localName string, de
 	if err != nil {
 		return err
 	}
-	for _, file := range modifiedFiles {
-		err := filecopy.CopyFileAll(filepath.Join(projectRoot, file), filepath.Join(tmpSrcDir, file))
-		if err != nil {
-			return fmt.Errorf("copying file %s: %w", file, err)
+	if false {
+		for _, file := range modifiedFiles {
+			err := filecopy.CopyFileAll(filepath.Join(projectRoot, file), filepath.Join(tmpSrcDir, file))
+			if err != nil {
+				return fmt.Errorf("copying file %s: %w", file, err)
+			}
 		}
 	}
 
@@ -171,7 +173,10 @@ func buildRelease(releaseDirName string, installLocal bool, localName string, de
 		rev += fmt.Sprintf("_DEV_%s", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
 	}
 
-	err = fixupSrcDir(tmpSrcDir, rev)
+	restore, err := fixupSrcDir(tmpSrcDir, rev)
+	if restore != nil {
+		defer restore()
+	}
 	if err != nil {
 		return err
 	}
@@ -193,7 +198,7 @@ func buildRelease(releaseDirName string, installLocal bool, localName string, de
 		}
 	}
 	if includeInstallSrc {
-		err := createInstallSRC(filepath.Join(dir, "install-src.zip"), filepath.Join(projectRoot, "script", "install"))
+		err := createInstallSRC(filepath.Join(dir, "install-src.zip"), projectRoot)
 		if err != nil {
 			return err
 		}
@@ -266,20 +271,20 @@ func buildBinaryRelease(dir string, srcDir string, version string, goos string, 
 	if err != nil {
 		return err
 	}
-	tmpDir, err := os.MkdirTemp("", "xgo-release")
+	tmpDir, err := os.MkdirTemp(".", "xgo-release")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
 
 	exeSuffix := osinfo.EXE_SUFFIX
-
-	archive := filepath.Join(tmpDir, "archive")
+	//
+	archive, _ := filepath.Abs(filepath.Join(tmpDir, "archive"))
 
 	bins := [][2]string{
 		{"xgo", "./cmd/xgo"},
-		{"exec_tool", "./cmd/exec_tool"},
-		{"trace", "./cmd/trace"},
+		// {"exec_tool", "./cmd/exec_tool"},
+		// {"trace", "./cmd/trace"},
 	}
 
 	var archiveFilesWithExe []string
@@ -357,7 +362,6 @@ func buildBinaryRelease(dir string, srcDir string, version string, goos string, 
 	if err != nil {
 		return err
 	}
-
 	// mv the release to dir
 	targetArchive := filepath.Join(dir, fmt.Sprintf("xgo%s-%s-%s.tar.gz", version, goos, goarch))
 	err = os.Rename(archive, targetArchive)

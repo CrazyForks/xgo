@@ -1,19 +1,17 @@
 package func_list
 
 import (
-	"net"
-	"net/http"
-	"os/exec"
+	_ "encoding/json"
+	_ "io"
+	_ "io/ioutil"
+	_ "net"
+	_ "net/http"
+	_ "os/exec"
 	"testing"
-	"time"
+	_ "time"
 
 	"github.com/xhd2015/xgo/runtime/functab"
 )
-
-var _ http.Request
-var _ net.Addr
-var _ time.Time
-var _ exec.Cmd
 
 // go run ./cmd/xgo test --project-dir runtime -run TestListStdlib -v ./test/func_list
 func TestListStdlib(t *testing.T) {
@@ -21,11 +19,24 @@ func TestListStdlib(t *testing.T) {
 
 	stdPkgs := map[string]bool{
 		// os
-		"os.Getenv": true,
-		"os.Getwd":  true,
+		"os.Getenv":    true,
+		"os.Getwd":     true,
+		"os.OpenFile":  true,
+		"os.ReadFile":  true,
+		"os.WriteFile": true,
+
+		// io
+		"io.ReadAll": true,
+
+		// io/ioutl
+		"io/ioutil.ReadAll":  true,
+		"io/ioutil.ReadFile": true,
+		"io/ioutil.ReadDir":  true,
 
 		// time
 		"time.Now":         true,
+		"time.Sleep":       true,
+		"time.NewTicker":   true,
 		"time.Time.Format": true,
 
 		// exec
@@ -52,7 +63,14 @@ func TestListStdlib(t *testing.T) {
 		"net.DialUDP":     true,
 		"net.DialUnix":    true,
 		"net.DialTimeout": true,
+
+		//json
+		"encoding/json.newTypeEncoder": true,
 	}
+	// debug
+	// stdPkgs = map[string]bool{
+	// 	"net/http.Get": true,
+	// }
 	found, missing := getMissing(funcs, stdPkgs, false)
 	if len(missing) > 0 {
 		t.Fatalf("expect func list contains: %v, actual %v", missing, found)

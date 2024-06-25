@@ -7,6 +7,11 @@ for _, fn := range __xgo_on_init_finished_callbacks {
 __xgo_on_init_finished_callbacks = nil
 `
 
+const RuntimeProcGoroutineCreatedPatch = `for _, fn := range __xgo_on_gonewproc_callbacks {
+	fn(uintptr(unsafe.Pointer(xgo_newg)))
+}
+`
+
 // added after goroutine exit1
 const RuntimeProcGoroutineExitPatch = `for _, fn := range __xgo_on_goexits {
 	fn()
@@ -17,9 +22,18 @@ const TestingCallbackDeclarations = `func __xgo_link_get_test_starts() []interfa
 	return nil
 }
 `
+const TestingEndCallbackDeclarations = `func __xgo_link_get_test_ends() []interface{}{
+	// link by compiler
+	return nil
+}
+`
 
 const TestingStart = `for _,__xgo_on_test_start:=range __xgo_link_get_test_starts(){
 	(__xgo_on_test_start.(func(*T,func(*T))))(t,fn)
+}
+`
+const TestingEnd = `for _,__xgo_on_test_end:=range __xgo_link_get_test_ends(){
+	defer (__xgo_on_test_end.(func(*T,func(*T))))(t,fn)
 }
 `
 
@@ -73,7 +87,7 @@ if os.Getenv("XGO_COMPILER_ENABLE")=="true" {
 	for _, n := range noders {
 		files = append(files, n.file)
 	}
-	xgo_syntax.AfterFilesParsed(files, func(name string, r io.Reader) {
+	xgo_syntax.AfterFilesParsed(files, func(name string, r io.Reader) *syntax.File {
 		p := &noder{
 			err: make(chan syntax.Error),
 		}
@@ -82,10 +96,19 @@ if os.Getenv("XGO_COMPILER_ENABLE")=="true" {
 		if err != nil {
 			e := err.(syntax.Error)
 			p.error(e)
-			return
+			return nil
 		}
 		p.file = file
 		noders = append(noders, p)
+
+		// move to head
+		n := len(noders)
+		for i:=n-1;i>0;i--{
+			noders[i]=noders[i-1]
+		}
+		noders[0]=p
+
+		return file
 	})
 }
 `
@@ -96,17 +119,26 @@ if os.Getenv("XGO_COMPILER_ENABLE")=="true" {
 	for _, n := range noders {
 		files = append(files, n.file)
 	}
-	xgo_syntax.AfterFilesParsed(files, func(name string, r io.Reader) {
+	xgo_syntax.AfterFilesParsed(files, func(name string, r io.Reader) *syntax.File {
 		p := &noder{}
 		fbase := syntax.NewFileBase(name)
 		file, err := syntax.Parse(fbase, r, nil, p.pragma, syntax.CheckBranches)
 		if err != nil {
 			e := err.(syntax.Error)
 			base.ErrorfAt(p.makeXPos(e.Pos), "%s", e.Msg)
-			return
+			return nil
 		}
 		p.file = file
 		noders = append(noders, p)
+
+		// move to head
+		n := len(noders)
+		for i:=n-1;i>0;i--{
+			noders[i]=noders[i-1]
+		}
+		noders[0]=p
+
+		return file
 	})
 }
 `
@@ -117,17 +149,26 @@ if os.Getenv("XGO_COMPILER_ENABLE")=="true" {
 	for _, n := range noders {
 		files = append(files, n.file)
 	}
-	xgo_syntax.AfterFilesParsed(files, func(name string, r io.Reader) {
+	xgo_syntax.AfterFilesParsed(files, func(name string, r io.Reader) *syntax.File {
 		p := &noder{}
 		fbase := syntax.NewFileBase(name)
 		file, err := syntax.Parse(fbase, r, nil, p.pragma, syntax.CheckBranches)
 		if err != nil {
 			e := err.(syntax.Error)
 			base.ErrorfAt(m.makeXPos(e.Pos), 0,"%s", e.Msg)
-			return
+			return nil
 		}
 		p.file = file
 		noders = append(noders, p)
+
+		// move to head
+		n := len(noders)
+		for i:=n-1;i>0;i--{
+			noders[i]=noders[i-1]
+		}
+		noders[0]=p
+
+		return file
 	})
 }
 `

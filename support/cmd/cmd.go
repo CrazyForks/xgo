@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,10 +17,12 @@ func Run(cmd string, args ...string) error {
 }
 
 type CmdBuilder struct {
-	env    []string
-	dir    string
-	stdout io.Writer
-	stderr io.Writer
+	env         []string
+	dir         string
+	debug       bool
+	ignoreError bool
+	stdout      io.Writer
+	stderr      io.Writer
 }
 
 func Env(env []string) *CmdBuilder {
@@ -32,6 +35,15 @@ func Dir(dir string) *CmdBuilder {
 	return &CmdBuilder{
 		dir: dir,
 	}
+}
+func Debug() *CmdBuilder {
+	return &CmdBuilder{
+		debug: true,
+	}
+}
+func IgnoreError(b ...bool) *CmdBuilder {
+	c := &CmdBuilder{}
+	return c.IgnoreError(b...)
 }
 
 func New() *CmdBuilder {
@@ -48,15 +60,26 @@ func (c *CmdBuilder) Dir(dir string) *CmdBuilder {
 }
 
 func (c *CmdBuilder) Stdout(stdout io.Writer) *CmdBuilder {
-	if stdout != nil {
-		c.stdout = stdout
-	}
+	c.stdout = stdout
 	return c
 }
+
 func (c *CmdBuilder) Stderr(stderr io.Writer) *CmdBuilder {
-	if stderr != nil {
-		c.stderr = stderr
+	c.stderr = stderr
+	return c
+}
+
+func (c *CmdBuilder) Debug() *CmdBuilder {
+	c.debug = true
+	return c
+}
+
+func (c *CmdBuilder) IgnoreError(b ...bool) *CmdBuilder {
+	ignore := true
+	if len(b) > 0 {
+		ignore = b[0]
 	}
+	c.ignoreError = ignore
 	return c
 }
 
@@ -73,12 +96,36 @@ func cmdExec(cmd string, args []string, dir string, pipeStdout bool) (string, er
 	return cmdExecEnv(cmd, args, nil, dir, pipeStdout, nil)
 }
 func cmdExecEnv(cmd string, args []string, env []string, dir string, useStdout bool, c *CmdBuilder) (string, error) {
-	execCmd := exec.Command(cmd, args...)
+	var stderr io.Writer
 	if c != nil && c.stderr != nil {
-		execCmd.Stderr = c.stderr
+		stderr = c.stderr
 	} else {
-		execCmd.Stderr = os.Stderr
+		stderr = os.Stderr
 	}
+	if c != nil && c.debug {
+		var lines []string
+		if len(env) > 0 {
+			for _, e := range env {
+				lines = append(lines, "# "+e)
+			}
+		}
+		if dir != "" {
+			lines = append(lines, "# cd "+Quote(dir))
+		}
+		cmdQuotes := make([]string, 0, 1+len(args))
+		cmdQuotes = append(cmdQuotes, cmd)
+		for _, arg := range args {
+			cmdQuotes = append(cmdQuotes, Quote(arg))
+		}
+		cmdStr := strings.Join(cmdQuotes, " ")
+		lines = append(lines, cmdStr)
+		for _, line := range lines {
+			fmt.Fprintln(stderr, line)
+		}
+	}
+
+	execCmd := exec.Command(cmd, args...)
+	execCmd.Stderr = stderr
 	if len(env) > 0 {
 		execCmd.Env = os.Environ()
 		execCmd.Env = append(execCmd.Env, env...)
@@ -92,8 +139,12 @@ func cmdExecEnv(cmd string, args []string, env []string, dir string, useStdout b
 		return "", execCmd.Run()
 	}
 	out, err := execCmd.Output()
+	outStr := strings.TrimSuffix(string(out), "\n")
 	if err != nil {
-		return "", err
+		if c != nil && !c.ignoreError {
+			return outStr, err
+		}
+		err = nil
 	}
-	return strings.TrimSuffix(string(out), "\n"), nil
+	return outStr, nil
 }

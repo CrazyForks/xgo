@@ -6,12 +6,9 @@ import (
 	"github.com/xhd2015/xgo/runtime/trace"
 )
 
-func init() {
-	trace.Enable()
-}
-
 // xgo test -run TestUpdateUserInfo -v ./test/stack_trace
 func TestUpdateUserInfo(t *testing.T) {
+	defer trace.Begin()()
 	oldUserName := "old user"
 	actualName, err := UpdateUserInfo(oldUserName)
 	if err != nil {
@@ -31,5 +28,6 @@ func TestUpdateUserInfo(t *testing.T) {
 
 // xgo test -run TestDeleteUserInfoPanic -v ./test/stack_trace
 func TestDeleteUserInfoPanic(t *testing.T) {
+	defer trace.Begin()()
 	DeleteUserInfo("xhd2015")
 }

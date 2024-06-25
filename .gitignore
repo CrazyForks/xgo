@@ -28,3 +28,7 @@
 # coverage
 /covers
 cover*.out
+
+/tmp
+
+debug-compile.json

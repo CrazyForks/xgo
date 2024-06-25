@@ -10,62 +10,165 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/xhd2015/xgo/script/build-release/revision"
+	"github.com/xhd2015/xgo/support/git"
 	"github.com/xhd2015/xgo/support/goparse"
 	"github.com/xhd2015/xgo/support/transform"
 
 	"github.com/xhd2015/xgo/support/filecopy"
 )
 
+type GenernateType string
+
+const (
+	GenernateType_CompilerPatch       GenernateType = "compiler-patch"
+	GenernateType_CompilerHelperCode  GenernateType = "compiler-helper-code"
+	GenernateType_CompilerPatternCode GenernateType = "compiler-pattern-code"
+	GenernateType_RuntimeDef          GenernateType = "runtime-def"
+	GenernateType_RuntimeVersion      GenernateType = "runtime-version"
+	GenernateType_StackTraceDef       GenernateType = "stack-trace-def"
+	GenernateType_InstallSrc          GenernateType = "install-src"
+	GenernateType_XgoRuntime          GenernateType = "xgo-runtime"
+)
+
 func main() {
 	args := os.Args[1:]
+
 	var rootDir string
-	if len(args) > 0 {
-		rootDir = args[0]
+	var subGens []GenernateType
+	n := len(args)
+	for i := 0; i < n; i++ {
+		arg := args[i]
+		if arg == "--root-dir" {
+			rootDir = args[i+1]
+			i++
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			subGens = append(subGens, GenernateType(arg))
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "unrecognized flag: %s\n", arg)
+		os.Exit(1)
 	}
-	err := generate(rootDir)
+
+	err := generate(rootDir, subGens)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 }
 
-func generate(rootDir string) error {
-	err := generateRunTimeDefs(
-		filepath.Join(rootDir, "runtime", "trap_runtime", "xgo_trap.go"),
-		filepath.Join(rootDir, "cmd", "xgo", "patch", "runtime_def_gen.go"),
-		filepath.Join(rootDir, "patch", "syntax", "syntax_gen.go"),
-		filepath.Join(rootDir, "patch", "trap_gen.go"),
-	)
-	if err != nil {
-		return err
+type SubGens []GenernateType
+
+func (c SubGens) Has(genType GenernateType) bool {
+	if len(c) == 0 {
+		return true
 	}
-	err = copyTraceExport(
-		filepath.Join(rootDir, "runtime", "trace", "stack_export.go"),
-		filepath.Join(rootDir, "cmd", "trace", "stack_export.go"),
-	)
-	if err != nil {
-		return err
+	for _, subGen := range c {
+		if subGen == genType {
+			return true
+		}
+	}
+	return false
+}
+
+func generate(rootDir string, subGens SubGens) error {
+	if rootDir == "" {
+		resolvedRoot, err := git.ShowTopLevel("")
+		if err != nil {
+			return err
+		}
+		rootDir = resolvedRoot
+	}
+	if subGens.Has(GenernateType_CompilerPatch) {
+		err := generateCompilerPatch(rootDir)
+		if err != nil {
+			return err
+		}
+	}
+	if subGens.Has(GenernateType_RuntimeDef) {
+		err := generateRunTimeDefs(
+			filepath.Join(rootDir, "patch", "trap_runtime", "xgo_trap.go"),
+			filepath.Join(rootDir, "cmd", "xgo", "patch", "runtime_def_gen.go"),
+			filepath.Join(rootDir, "patch", "syntax", "syntax_gen.go"),
+			filepath.Join(rootDir, "patch", "trap_gen.go"),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if subGens.Has(GenernateType_RuntimeVersion) {
+		err := generateRunTimeVersion(
+			revision.GetXgoVersionFile(rootDir),
+			revision.GetRuntimeVersionFile(rootDir),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if subGens.Has(GenernateType_StackTraceDef) {
+		err := copyTraceExport(
+			filepath.Join(rootDir, "runtime", "trace", "stack_export.go"),
+			filepath.Join(rootDir, "cmd", "xgo", "trace", "stack_export.go"),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if subGens.Has(GenernateType_CompilerPatternCode) {
+		// copy files
+		srcDir := filepath.Join(rootDir, "support", "pattern")
+		dstDir := filepath.Join(rootDir, "patch", "match")
+		files, err := os.ReadDir(srcDir)
+		if err != nil {
+			return err
+		}
+		for _, file := range files {
+			if file.IsDir() || !strings.HasSuffix(file.Name(), ".go") || strings.HasSuffix(file.Name(), "_test.go") {
+				continue
+			}
+			content, err := ioutil.ReadFile(filepath.Join(srcDir, file.Name()))
+			if err != nil {
+				return err
+			}
+			newContent := strings.Replace(string(content), "package pattern", "package match", 1)
+			newContent = prelude + newContent
+			err = ioutil.WriteFile(filepath.Join(dstDir, file.Name()), []byte(newContent), 0755)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if subGens.Has(GenernateType_CompilerHelperCode) {
+		info, err := generateFuncHelperCode(filepath.Join(rootDir, "patch", "syntax", "helper_code.go"))
+		if err != nil {
+			return err
+		}
+		infoCode := info.formatCode("syntax")
+		err = os.WriteFile(filepath.Join(rootDir, "patch", "syntax", "helper_code_gen.go"), []byte(infoCode), 0755)
+		if err != nil {
+			return err
+		}
 	}
 
-	info, err := generateFuncTabInfo(filepath.Join(rootDir, "patch", "syntax", "helper_code.go"))
-	if err != nil {
-		return err
-	}
-	infoCode := info.formatCode("syntax")
-	err = os.WriteFile(filepath.Join(rootDir, "patch", "syntax", "helper_code_gen.go"), []byte(infoCode), 0755)
-	if err != nil {
-		return err
-	}
+	if subGens.Has(GenernateType_InstallSrc) {
+		upgradeDst := filepath.Join(rootDir, "script", "install", "upgrade")
+		err := os.RemoveAll(upgradeDst)
+		if err != nil {
+			return err
+		}
 
-	upgradeDst := filepath.Join(rootDir, "script", "install", "upgrade")
-	err = os.RemoveAll(upgradeDst)
-	if err != nil {
-		return err
+		err = copyUpgrade(filepath.Join(rootDir, "cmd", "xgo", "upgrade"), upgradeDst)
+		if err != nil {
+			return err
+		}
 	}
-
-	err = copyUpgrade(filepath.Join(rootDir, "cmd", "xgo", "upgrade"), upgradeDst)
-	if err != nil {
-		return err
+	if subGens.Has(GenernateType_XgoRuntime) {
+		err := genXgoRuntime(rootDir)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -74,7 +177,7 @@ func generate(rootDir string) error {
 const prelude = "// Code generated by script/generate; DO NOT EDIT.\n" + "\n"
 
 func generateRunTimeDefs(file string, defFile string, syntaxFile string, trapFile string) error {
-	content, err := ioutil.ReadFile(file)
+	content, err := os.ReadFile(file)
 	if err != nil {
 		return err
 	}
@@ -115,7 +218,7 @@ func generateRunTimeDefs(file string, defFile string, syntaxFile string, trapFil
 
 	declCode := "// xgo\n" + strings.Join(decls, "\n")
 
-	defGenCode := prelude + "package patch\n" + "\n" + "//go:generate go run ../../../script/generate ../../..\n" + "const RuntimeExtraDef = `\n" + declCode + "`"
+	defGenCode := prelude + "package patch\n" + "\n" + "//go:generate go run ../../../script/generate " + string(GenernateType_RuntimeDef) + "\n" + "const RuntimeExtraDef = `\n" + declCode + "`"
 	syntaxGenCode := prelude + "package syntax\n" + "\n" + "const sig_gen__xgo_register_func = `" + sigRegisterFunc + "`"
 	trapGenCode := prelude + "package patch\n" + "\n" + "const sig_gen__xgo_trap = `" + sigTrap + "`"
 	err = ioutil.WriteFile(defFile, []byte(defGenCode), 0755)
@@ -136,6 +239,10 @@ func generateRunTimeDefs(file string, defFile string, syntaxFile string, trapFil
 	return nil
 }
 
+func generateRunTimeVersion(xgoVersionFile string, runtimeVersionFile string) error {
+	return revision.CopyCoreVersion(xgoVersionFile, runtimeVersionFile)
+}
+
 type genInfo struct {
 	funcStub   string
 	helperCode string
@@ -153,7 +260,7 @@ func (c *genInfo) formatCode(pkgName string) string {
 	return strings.Join(codes, "\n")
 }
 
-func generateFuncTabInfo(srcFile string) (*genInfo, error) {
+func generateFuncHelperCode(srcFile string) (*genInfo, error) {
 	astFile, fset, err := parseGoFile(srcFile, true)
 	if err != nil {
 		return nil, err
@@ -175,7 +282,11 @@ func generateFuncTabInfo(srcFile string) (*genInfo, error) {
 
 	funcStubCode := getSlice(code, fset, st.Pos(), st.End())
 
-	helperCode := getSlice(code, fset, astFile.Name.End(), astFile.FileEnd)
+	// TODO: use astFile.FileEnd
+	var fileEnd token.Pos
+	fileEnd = astFile.End()
+
+	helperCode := getSlice(code, fset, astFile.Name.End(), fileEnd)
 	return &genInfo{
 		funcStub:   funcStubCode,
 		helperCode: helperCode,
@@ -188,7 +299,8 @@ func copyTraceExport(srcFile string, targetFile string) error {
 		return err
 	}
 	content := string(contentBytes)
-	content = strings.ReplaceAll(content, "package trace", "package main")
+	// replace package
+	content = strings.ReplaceAll(content, "package trace", "package trace")
 	content = prelude + content
 
 	return os.WriteFile(targetFile, []byte(content), 0755)

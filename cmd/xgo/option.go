@@ -23,12 +23,15 @@ type options struct {
 
 	logCompile bool
 
-	logDebug *string
+	logDebug     *string
+	debugCompile *string
 
 	noBuildOutput   bool
 	noInstrument    bool
 	resetInstrument bool
 	noSetup         bool
+
+	optionsFromFile string
 
 	// dev only
 	debugWithDlv bool
@@ -41,14 +44,31 @@ type options struct {
 	buildCompiler bool
 	syncWithLink  bool
 
+	mod string
 	// recognize go flags as is
 	// -gcflags
-	gcflags string
+	// can repeat
+	gcflags []string
+
+	overlay string
+	modfile string
+
+	// --trap-stdlib
+	trapStdlib bool
+
+	// xgo test --trace
+
+	// --strace, --strace=on, --strace=off
+	// --stack-stackTrace, --stack-stackTrace=off, --stack-stackTrace=on
+	// to be used in test mode
+	stackTrace string
 
 	remainArgs []string
+
+	testArgs []string
 }
 
-func parseOptions(args []string) (*options, error) {
+func parseOptions(cmd string, args []string) (*options, error) {
 	var flagA bool
 	var flagV bool
 	var flagX bool
@@ -61,6 +81,8 @@ func parseOptions(args []string) (*options, error) {
 	var noInstrument bool
 	var resetInstrument bool
 	var noSetup bool
+
+	var optionsFromFile string
 
 	var debugWithDlv bool
 	var xgoHome string
@@ -77,12 +99,19 @@ func parseOptions(args []string) (*options, error) {
 
 	var logCompile bool
 	var logDebug *string
+	var debugCompile *string
 
 	var noBuildOutput bool
 
-	var gcflags string
+	var mod string
+	var gcflags []string
+	var overlay string
+	var modfile string
+	var stackTrace string
+	var trapStdlib bool
 
 	var remainArgs []string
+	var testArgs []string
 	nArg := len(args)
 
 	type FlagValue struct {
@@ -118,6 +147,10 @@ func parseOptions(args []string) (*options, error) {
 			Value: &withGoroot,
 		},
 		{
+			Flags: []string{"--options-from-file"},
+			Value: &optionsFromFile,
+		},
+		{
 			Flags: []string{"--dump-ir"},
 			Value: &dumpIR,
 		},
@@ -126,8 +159,28 @@ func parseOptions(args []string) (*options, error) {
 			Value: &dumpAST,
 		},
 		{
+			Flags: []string{"-mod"},
+			Set: func(v string) {
+				mod = v
+			},
+		},
+		{
 			Flags: []string{"-gcflags"},
-			Value: &gcflags,
+			Set: func(v string) {
+				gcflags = append(gcflags, v)
+			},
+		},
+		{
+			Flags: []string{"-overlay"},
+			Set: func(v string) {
+				overlay = v
+			},
+		},
+		{
+			Flags: []string{"-modfile"},
+			Set: func(v string) {
+				modfile = v
+			},
 		},
 		{
 			Flags:  []string{"--log-debug"},
@@ -145,11 +198,20 @@ func parseOptions(args []string) (*options, error) {
 		})
 	}
 
+	if cmd == "test" {
+		trapStdlib = true
+	}
+
 	for i := 0; i < nArg; i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "-") {
 			remainArgs = append(remainArgs, arg)
 			continue
+		}
+		if cmd == "test" && arg == "-args" {
+			// pass everything after -args to test binary
+			testArgs = append(testArgs, args[i:]...)
+			break
 		}
 		if arg == "--" {
 			remainArgs = append(remainArgs, args[i+1:]...)
@@ -211,6 +273,37 @@ func parseOptions(args []string) (*options, error) {
 			noSetup = true
 			continue
 		}
+
+		if strings.HasPrefix(arg, "--debug-compile") {
+			flag := strings.TrimPrefix(arg, "--debug-compile")
+			if flag == "" {
+				debugCompile = new(string)
+				continue
+			}
+			if strings.HasPrefix(flag, "=") {
+				s := strings.TrimPrefix(flag, "=")
+				debugCompile = &s
+				continue
+			}
+		}
+
+		argVal, ok := parseStackTraceFlag(arg)
+		if ok {
+			stackTrace = argVal
+			continue
+		}
+
+		// supported flag: --trap-stdlib, --trap-stdlib=false, --trap-stdlib=true
+		trapStdlibFlag, trapStdlibVal := flag.TrySingleFlag([]string{"--trap-stdlib"}, arg)
+		if trapStdlibFlag != "" {
+			if trapStdlibVal == "" || trapStdlibVal == "true" {
+				trapStdlib = true
+			} else {
+				trapStdlib = false
+			}
+			continue
+		}
+
 		if isDevelopment && arg == "--debug-with-dlv" {
 			debugWithDlv = true
 			continue
@@ -226,7 +319,7 @@ func parseOptions(args []string) (*options, error) {
 				}
 				continue
 			}
-			ok, err := flag.TryParseFlagsValue(flagVal.Flags, flagVal.Value, &i, args)
+			ok, err := flag.TryParseFlagsValue(flagVal.Flags, flagVal.Value, flagVal.Set, &i, args)
 			if err != nil {
 				return nil, err
 			}
@@ -276,15 +369,19 @@ func parseOptions(args []string) (*options, error) {
 		dumpIR:     dumpIR,
 		dumpAST:    dumpAST,
 
-		logCompile: logCompile,
-		logDebug:   logDebug,
+		logCompile:   logCompile,
+		logDebug:     logDebug,
+		debugCompile: debugCompile,
 
 		noBuildOutput:   noBuildOutput,
 		noInstrument:    noInstrument,
 		resetInstrument: resetInstrument,
 		noSetup:         noSetup,
-		debugWithDlv:    debugWithDlv,
-		xgoHome:         xgoHome,
+
+		optionsFromFile: optionsFromFile,
+
+		debugWithDlv: debugWithDlv,
+		xgoHome:      xgoHome,
 
 		syncXgoOnly:   syncXgoOnly,
 		setupDev:      setupDev,
@@ -292,8 +389,75 @@ func parseOptions(args []string) (*options, error) {
 		// default true
 		syncWithLink: syncWithLink == nil || *syncWithLink,
 
-		gcflags: gcflags,
+		mod:        mod,
+		gcflags:    gcflags,
+		overlay:    overlay,
+		modfile:    modfile,
+		stackTrace: stackTrace,
+		trapStdlib: trapStdlib,
 
 		remainArgs: remainArgs,
+		testArgs:   testArgs,
 	}, nil
+}
+
+func parseStackTraceFlag(arg string) (string, bool) {
+	var stackTracePrefix string
+	if strings.HasPrefix(arg, "--strace") {
+		stackTracePrefix = "--strace"
+	} else if strings.HasPrefix(arg, "--stack-trace") {
+		stackTracePrefix = "--stack-trace"
+	}
+	if stackTracePrefix == "" {
+		return "", false
+	}
+	if len(arg) == len(stackTracePrefix) {
+		return "on", true
+	}
+	if arg[len(stackTracePrefix)] != '=' {
+		return "", false
+	}
+	val := arg[len(stackTracePrefix)+1:]
+	if val == "" || val == "on" {
+		return "on", true
+	}
+	if val == "off" {
+		return "off", true
+	}
+	panic(fmt.Errorf("unrecognized value %s: %s, expects on|off", arg, val))
+}
+
+func getPkgArgs(args []string) []string {
+	n := len(args)
+	newArgs := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			// stop at first non-arg
+			newArgs = append(newArgs, args[i:]...)
+			break
+		}
+		if arg == "-args" {
+			// go test -args: pass everything after to underlying program
+			break
+		}
+		eqIdx := strings.Index(arg, "=")
+		if eqIdx >= 0 {
+			// self hosted arg
+			continue
+		}
+		// make --opt equivalent with -opt
+		if strings.HasPrefix(arg, "--") {
+			arg = arg[1:]
+		}
+		switch arg {
+		case "-a", "-n", "-race", "-masan", "-asan", "-cover", "-v", "-work", "-x", "-linkshared", "-buildvcs", // shared among build,test,run
+			"-args", "-c", "-json": // -json for test
+			// zero arg
+		default:
+			// 1 arg
+			i++
+		}
+	}
+	return newArgs
 }

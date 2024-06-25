@@ -8,8 +8,22 @@ import (
 const XgoModule = "github.com/xhd2015/xgo"
 const XgoRuntimePkg = XgoModule + "/runtime"
 const XgoRuntimeCorePkg = XgoModule + "/runtime/core"
+const XgoRuntimeTracePkg = XgoModule + "/runtime/trace"
+
+const XgoLinkTrapVarForGenerated = "__xgo_link_trap_var_for_generated"
+
+func InitAfterLoad() {
+	isMainModule = IsSameModule(GetPkgPath(), XgoMainModule)
+}
 
 func SkipPackageTrap() bool {
+	pkgPath := GetPkgPath()
+	if pkgPath == "" {
+		return true
+	}
+	if pkgPath == "runtime" || strings.HasPrefix(pkgPath, "runtime/") || strings.HasPrefix(pkgPath, "internal/") {
+		return true
+	}
 	if base.Flag.Std {
 		// skip std lib, especially skip:
 		//    runtime, runtime/internal, runtime/*, reflect, unsafe, syscall, sync, sync/atomic,  internal/*
@@ -23,15 +37,22 @@ func SkipPackageTrap() bool {
 		// because generic instantiation happens in other package, so this
 		// func may be a foreigner.
 
+		if XgoStdTrapDefaultAllow {
+			if _, ok := stdBlocklist[pkgPath]["*"]; ok {
+				return true
+			}
+			return false
+		}
 		// allow http
-		pkgPath := GetPkgPath()
-		if pkgPath == "net/http" || pkgPath == "net" || pkgPath == "time" || pkgPath == "os" || pkgPath == "os/exec" {
+		if _, ok := stdWhitelist[pkgPath]; ok {
 			return false
 		}
 		return true
 	}
+	if isSkippableSpecialPkg(pkgPath) {
+		return true
+	}
 
-	pkgPath := GetPkgPath()
 	if IsPkgXgoSkipTrap(pkgPath) {
 		return true
 	}
@@ -44,53 +65,15 @@ func SkipPackageTrap() bool {
 	return false
 }
 
-var stdWhitelist = map[string]map[string]bool{
-	"os": map[string]bool{
-		// starts with Get
-	},
-	"time": map[string]bool{
-		"Now":         true,
-		"Time.Format": true,
-	},
-	"os/exec": map[string]bool{
-		"Command":       true,
-		"(*Cmd).Run":    true,
-		"(*Cmd).Output": true,
-		"(*Cmd).Start":  true,
-	},
-	"net/http": map[string]bool{
-		"Get":  true,
-		"Head": true,
-		"Post": true,
-		// Sever
-		"Serve":           true,
-		"Handle":          true,
-		"(*Client).Do":    true,
-		"(*Server).Close": true,
-	},
-	"net": map[string]bool{
-		// starts with Dial
-	},
-}
-
 func AllowPkgFuncTrap(pkgPath string, isStd bool, funcName string) bool {
 	if isStd {
-		if stdWhitelist[pkgPath][funcName] {
-			return true
-		}
-		switch pkgPath {
-		case "os":
-			return strings.HasPrefix(funcName, "Get")
-		case "net":
-			return strings.HasPrefix(funcName, "Dial")
-		}
-		// by default block all
-		return false
+		return allowStdFunc(pkgPath, funcName)
 	}
 
 	return true
 }
 
+// skip all packages for xgo,except test
 func IsPkgXgoSkipTrap(pkg string) bool {
 	suffix, ok := cutPkgPrefix(pkg, XgoModule)
 	if !ok {
@@ -99,7 +82,7 @@ func IsPkgXgoSkipTrap(pkg string) bool {
 	if suffix == "" {
 		return true
 	}
-	// check if the package is test, runtime/test
+	// check if the package is test or runtime/test
 	_, ok = cutPkgPrefix(suffix, "test")
 	if ok {
 		return false
@@ -123,4 +106,30 @@ func cutPkgPrefix(s string, pkg string) (suffix string, ok bool) {
 		return "", false
 	}
 	return s[n+1:], true
+}
+
+var isMainModule bool
+
+func IsMainModule() bool {
+	return isMainModule
+}
+
+func IsPkgMainModule(pkg string) bool {
+	return IsSameModule(pkg, XgoMainModule)
+}
+
+func IsSameModule(pkgPath string, modulePath string) bool {
+	if modulePath == "" {
+		return false
+	}
+	if !strings.HasPrefix(pkgPath, modulePath) {
+		return false
+	}
+	if len(pkgPath) == len(modulePath) {
+		return true
+	}
+	if pkgPath[len(modulePath)] == '/' {
+		return true
+	}
+	return false
 }

@@ -24,28 +24,44 @@ func editFile(file string, callback func(content string) (string, error)) error 
 	return ioutil.WriteFile(file, []byte(newContent), 0755)
 }
 
+// Deprecated: use addContentAtIndex instead
 func addCodeAfterImports(code string, beginMark string, endMark string, contents []string) string {
 	idx := indexSeq(code, []string{"import", "(", "\n"}, false)
 	if idx < 0 {
 		panic(fmt.Errorf("import not found"))
 	}
-	return insertConentNoDudplicate(code, beginMark, endMark, idx, strings.Join(contents, "\n")+"\n")
+	return insertContentNoDuplicate(code, beginMark, endMark, idx, strings.Join(contents, "\n")+"\n")
 }
 
+// Deprecated: use addContentAtIndex instead
 func addContentBefore(content string, beginMark string, endMark string, seq []string, addContent string) string {
 	return addContentAt(content, beginMark, endMark, seq, addContent, true)
 }
 
+// Deprecated: use addContentAtIndex instead
 func addContentAfter(content string, beginMark string, endMark string, seq []string, addContent string) string {
 	return addContentAt(content, beginMark, endMark, seq, addContent, false)
 }
 
+// Deprecated: use addContentAtIndex instead
 func addContentAt(content string, beginMark string, endMark string, seq []string, addContent string, begin bool) string {
 	idx := indexSeq(content, seq, begin)
 	if idx < 0 {
 		panic(fmt.Errorf("sequence not found: %v", seq))
 	}
-	return insertConentNoDudplicate(content, beginMark, endMark, idx, addContent)
+	return insertContentNoDuplicate(content, beginMark, endMark, idx, addContent)
+}
+
+func addContentAtIndex(content string, beginMark string, endMark string, seq []string, i int, before bool, addContent string) string {
+	offset, endOffset := strutil.SequenceOffset(content, seq, i, before)
+	if offset < 0 {
+		panic(fmt.Errorf("sequence missing: %v", seq))
+	}
+	anotherOff, _ := strutil.SequenceOffset(content[endOffset:], seq, i, false)
+	if anotherOff >= 0 {
+		panic(fmt.Errorf("sequence duplicate: %v", seq))
+	}
+	return insertContentNoDuplicate(content, beginMark, endMark, offset, addContent)
 }
 
 func replaceContentAfter(content string, beginMark string, endMark string, seq []string, target string, replaceContent string) string {
@@ -72,7 +88,8 @@ func replaceContentAfter(content string, beginMark string, endMark string, seq [
 }
 
 // signature example: /*<begin ident>*/ {content} /*<end ident>*/
-func insertConentNoDudplicate(content string, beginMark string, endMark string, idx int, insertContent string) string {
+// insert content at index
+func insertContentNoDuplicate(content string, beginMark string, endMark string, idx int, insertContent string) string {
 	if insertContent == "" {
 		return content
 	}

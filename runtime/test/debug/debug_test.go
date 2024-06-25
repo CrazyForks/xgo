@@ -1,43 +1,41 @@
-// debug test is a convienent package
+// debug test is a convenient package
 // you can paste your minimal code your
 // to focus only the problemtic part of
 // failing code
+//
+// usage:
+//  go run -tags dev ./cmd/xgo test --project-dir runtime/test/debug
+//  go run -tags dev ./cmd/xgo test --debug-compile --project-dir runtime/test/debug
 
 package debug
 
 import (
-	"context"
 	"testing"
 
-	"github.com/xhd2015/xgo/runtime/core"
-	"github.com/xhd2015/xgo/runtime/trap"
+	"github.com/xhd2015/xgo/runtime/mock"
 )
 
-func TestTrapAbortInTheMiddle(t *testing.T) {
-	trap.AddInterceptor(&trap.Interceptor{
-		Pre: func(ctx context.Context, f *core.FuncInfo, args, result core.Object) (interface{}, error) {
-			if f.IdentityName == "double" {
-				panic("should be aborted")
-			}
-			return nil, nil
-		},
-	})
-	trap.AddInterceptor(&trap.Interceptor{
-		Pre: func(ctx context.Context, f *core.FuncInfo, args, result core.Object) (interface{}, error) {
-			if f.IdentityName == "double" {
-				args.GetField("i").Set(20)
-				return nil, trap.ErrAbort
-			}
-			return nil, nil
-		},
-	})
-
-	d := double(1)
-	if d != 0 {
-		t.Fatalf("expect double(1) to be aborted so return %d actual: %d", 0, d)
-	}
+// see bug https://github.com/xhd2015/xgo/issues/211
+type GenericSt[T any] struct {
+	Data T
 }
 
-func double(i int) int {
-	return 2 * i
+func (g GenericSt[T]) GetData(param T) T {
+	return param
+}
+
+type Inner struct {
+}
+
+func TestNonPrimitiveGenericAllInstance(t *testing.T) {
+	var mocked bool
+	mock.Patch(GenericSt[Inner].GetData, func(GenericSt[Inner], Inner) Inner {
+		mocked = true
+		return Inner{}
+	})
+	v := GenericSt[Inner]{}
+	v.GetData(Inner{})
+	if !mocked {
+		t.Fatalf("expected mocked, actually not")
+	}
 }

@@ -4,23 +4,50 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+
 	"time"
 
-	"github.com/xhd2015/xgo/support/cmd"
+	"github.com/xhd2015/xgo/support/github"
+	"github.com/xhd2015/xgo/support/httputil"
+	"github.com/xhd2015/xgo/support/strutil"
 )
 
 const latestURL = "https://github.com/xhd2015/xgo/releases/latest"
 
 func Upgrade(installDir string) error {
 	ctx := context.Background()
+	if true {
+		curXgoVersion, err := cmdXgoVersion()
+		if err != nil {
+			return err
+		}
+		// always run a simple go install command
+		err = cmdInstallXgo()
+		if err != nil {
+			return err
+		}
+		xgoVersionAfterUpdate, err := cmdXgoVersion()
+		if err != nil {
+			return err
+		}
+		if xgoVersionAfterUpdate == "" {
+			fmt.Fprintf(os.Stderr, "command 'xgo' not found, you may need to add $GOPATH/bin to your PATH\n")
+			return nil
+		}
+		if curXgoVersion == xgoVersionAfterUpdate {
+			fmt.Printf("upgraded xgo v%s\n", xgoVersionAfterUpdate)
+			return nil
+		}
+		fmt.Printf("upgraded xgo v%s -> v%s\n", curXgoVersion, xgoVersionAfterUpdate)
+		return nil
+	}
+
 	fmt.Printf("checking latest version...\n")
 	latestVersion, err := GetLatestVersion(ctx, 60*time.Second, latestURL)
 	if err != nil {
@@ -79,7 +106,7 @@ func Upgrade(installDir string) error {
 			return err
 		}
 	} else {
-		// windows
+		// Windows
 		tmpUnzip := filepath.Join(tmpDir, "unzip")
 		err = os.MkdirAll(tmpUnzip, 0755)
 		if err != nil {
@@ -133,89 +160,56 @@ func Upgrade(installDir string) error {
 
 // if xgo not found, return can be empty
 func cmdXgoVersion() (string, error) {
-	version, err := cmd.Output("xgo", "version")
+	version, err := cmdOutput("xgo", "version")
 	if err != nil && !errors.Is(err, exec.ErrNotFound) {
 		return "", err
 	}
 	return version, nil
+}
+func cmdInstallXgo() error {
+	cmd := exec.Command("go", "install", "github.com/xhd2015/xgo/cmd/xgo@latest")
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
+}
+
+func cmdOutput(cmd string, args ...string) (string, error) {
+	exeCmd := exec.Command(cmd, args...)
+	out, err := exeCmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
 func GetLatestVersion(ctx context.Context, timeout time.Duration, url string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	noRedirectClient := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := noRedirectClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 302 {
-		return "", fmt.Errorf("expect 302 from %s", url)
+	releaseTag, _ := github.GetLatestReleaseTag(ctx, url)
+	if releaseTag != "" {
+		return strings.TrimPrefix(releaseTag, "v"), nil
 	}
 
-	loc, err := resp.Location()
+	// old
+	path, err := httputil.Get302Location(ctx, url)
 	if err != nil {
 		return "", err
 	}
-
-	path := loc.Path
-	path, ok := trimLast(path, "/xgo-v")
+	path, ok := strutil.TrimBefore(path, "/xgo-v")
 	if !ok {
-		path, ok = trimLast(path, "/tag/v")
+		path, ok = strutil.TrimBefore(path, "/tag/v")
 	}
 	if !ok || path == "" {
-		return "", fmt.Errorf("expect tag format: xgo-v1.x.x or tag/v1.x.x, actual: %s", loc.Path)
+		return "", fmt.Errorf("expect tag format: xgo-v1.x.x or tag/v1.x.x, actual: %s", path)
 	}
 	versionName := path
 	return versionName, nil
-}
-
-func trimLast(s string, p string) (string, bool) {
-	i := strings.LastIndex(s, p)
-	if i < 0 {
-		return s, false
-	}
-	return s[i+len(p):], true
 }
 
 func DownloadFile(ctx context.Context, timeout time.Duration, downloadURL string, targetFile string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
-		return fmt.Errorf("%s not exists", downloadURL)
-	}
-	if resp.StatusCode != 200 {
-		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed: %s", data)
-	}
-	file, err := os.OpenFile(targetFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = io.Copy(file, resp.Body)
-	if err != nil {
-		return err
-	}
-	return nil
+	return httputil.DownloadFile(ctx, downloadURL, targetFile)
 }
