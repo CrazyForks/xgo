@@ -23,19 +23,19 @@ func GetG() G {
 }
 
 func (g G) DetachStack() {
-	runtime.AsG(unsafe.Pointer(g)).Delete(gStackKey)
+	runtime.AsG(unsafePointer(uintptr(g))).Delete(gStackKey)
 }
 
 func (g G) AttachStack(stack *Stack) {
 	if stack == nil {
 		panic("requires stack")
 	}
-	prevStack := runtime.AsG(unsafe.Pointer(g)).Get(gStackKey)
+	prevStack := runtime.AsG(unsafePointer(uintptr(g))).Get(gStackKey)
 	if prevStack != nil {
 		panic("stack already attached")
 	}
 
-	runtime.AsG(unsafe.Pointer(g)).Set(gStackKey, stack)
+	runtime.AsG(unsafePointer(uintptr(g))).Set(gStackKey, stack)
 }
 
 func (g G) GetStack() *Stack {
@@ -45,7 +45,7 @@ func (g G) GetStack() *Stack {
 	if !runtime.XgoInitFinished() {
 		return InitGStack
 	}
-	stack := runtime.AsG(unsafe.Pointer(g)).Get(gStackKey)
+	stack := runtime.AsG(unsafePointer(uintptr(g))).Get(gStackKey)
 	if stack == nil {
 		return nil
 	}
@@ -59,13 +59,13 @@ func (g G) GetOrAttachStack() *Stack {
 	if !runtime.XgoInitFinished() {
 		return InitGStack
 	}
-	prevStack := runtime.AsG(unsafe.Pointer(g)).Get(gStackKey)
+	prevStack := runtime.AsG(unsafePointer(uintptr(g))).Get(gStackKey)
 	if prevStack != nil {
 		return prevStack.(*Stack)
 	}
 	stack := &Stack{
 		Begin: runtime.XgoRealTimeNow(),
 	}
-	runtime.AsG(unsafe.Pointer(g)).Set(gStackKey, stack)
+	runtime.AsG(unsafePointer(uintptr(g))).Set(gStackKey, stack)
 	return stack
 }

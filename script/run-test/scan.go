@@ -104,6 +104,9 @@ func amedTestWithConfig(test *TestConfig, includePredefinedArgs bool) error {
 		{prefix: "go:", f: func(content string) {
 			test.Go = content
 		}},
+		{prefix: "skip:", f: func(content string) {
+			test.Skip = content
+		}},
 	}
 	lines := strings.Split(string(bytes), "\n")
 	for _, line := range lines {
@@ -135,12 +138,28 @@ func amedTestWithConfig(test *TestConfig, includePredefinedArgs bool) error {
 }
 func splitList(content string) []string {
 	var list []string
-	for _, e := range strings.Split(content, " ") {
-		e = strings.TrimSpace(e)
-		if e == "" {
+	n := len(content)
+
+	var buf []byte
+	for i := 0; i < n; i++ {
+		b := content[i]
+		// "\ " -> escape a space
+		if b == '\\' && (i+1 < n && content[i+1] == ' ') {
+			buf = append(buf, ' ')
+			i++
 			continue
 		}
-		list = append(list, e)
+		if b != ' ' {
+			buf = append(buf, b)
+			continue
+		}
+		if len(buf) > 0 {
+			list = append(list, string(buf))
+			buf = nil
+		}
+	}
+	if len(buf) > 0 {
+		list = append(list, string(buf))
 	}
 	return list
 }

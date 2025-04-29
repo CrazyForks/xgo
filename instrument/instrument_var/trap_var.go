@@ -72,7 +72,7 @@ func rewriteVarDefAndRefs(fset *token.FileSet, pkgPath string, file *edit.File, 
 	if declType != nil {
 		typeStart := fset.Position(declType.Pos()).Offset
 		typeEnd := fset.Position(declType.End()).Offset
-		typeCode = file.File.Content[typeStart:typeEnd]
+		typeCode = string(file.File.Content[typeStart:typeEnd])
 	} else if decl.ResolvedValueType != nil {
 		useContext := &UseContext{
 			fset:        fset,
@@ -86,7 +86,7 @@ func rewriteVarDefAndRefs(fset *token.FileSet, pkgPath string, file *edit.File, 
 		litType := lit.Type
 		typeStart := fset.Position(litType.Pos()).Offset
 		typeEnd := fset.Position(litType.End()).Offset
-		typeCode = file.File.Content[typeStart:typeEnd]
+		typeCode = string(file.File.Content[typeStart:typeEnd])
 	}
 	if typeCode == "" {
 		return false
@@ -215,6 +215,9 @@ func (c *UseContext) doUseTypeInFile(typ types.Type) (res string) {
 		return "(" + strings.Join(list, ", ") + ")"
 	case types.Map:
 		return fmt.Sprintf("map[%s]%s", c.doUseTypeInFile(typ.Key), c.doUseTypeInFile(typ.Value))
+	case types.Slice:
+		// slice, but not array
+		return fmt.Sprintf("[]%s", c.doUseTypeInFile(typ.Elem))
 	case types.LazyType:
 		return c.doUseTypeInFile(typ())
 	default:

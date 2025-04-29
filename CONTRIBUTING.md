@@ -97,7 +97,25 @@ If a go version is not found in `go-release`, it can be downloaded via:
 go run ./script/download-go go1.22.1
 ```
 
-# Debug `xgo`
+Run test under xgo root:
+```sh
+go test -v $(go list -e ./... | grep -Ev 'asset|internal/vendir')
+```
+
+# Develop `patch`
+```sh
+# download go1.24.2 
+go run ./script/download-go go1.24.2
+
+# debug compiler(with linked files)
+go run -tags=dev ./cmd/xgo test --with-goroot go-release/go1.24.2 --debug-compile=time --project-dir ./runtime/test/patch/debug -a -v ./
+```
+
+# Debug
+
+## Native setup
+
+Debug `xgo`
 ```sh
 # build, can add -tags dev
 go build -o xgo -gcflags="all=-N -l" ./cmd/xgo
@@ -106,7 +124,32 @@ go build -o xgo -gcflags="all=-N -l" ./cmd/xgo
 dlv exec --listen=:2345 --api-version=2 --check-go-version=false --headless -- ./xgo test --project-dir runtime/test -v ./patch
 ```
 
-# Debug `go`
+## Debug with `./script/run-test`
+
+Debug `go`:
+```sh
+go run ./script/run-test --debug-go --include go1.24.1 ./test/debug
+```
+
+Debug `go tool compile`
+```sh
+go run ./script/run-test --debug-compile --include go1.24.1 ./test/debug
+go run ./script/run-test --debug-compile=some/pkg --include go1.24.1 ./test/debug
+```
+
+Debug `xgo`
+```sh
+go run ./script/run-test --debug-xgo --include go1.24.1 ./test/debug
+```
+
+Debug the program itself:
+```sh
+go run ./script/run-test --debug --include go1.24.1 ./test/debug
+```
+
+## Debug with `./script/xgo.helper`
+
+### Debug `go`
 ```sh
 go install ./script/xgo.helper
 cp -r $GOROOT ~/GOROOT_DEBUG
@@ -118,7 +161,7 @@ xgo.helper setup-vscode ~/GOROOT_DEBUG
 xgo.helper debug-go ~/GOROOT_DEBUG -C $X/xgo/runtime/test/patch/real_world/kusia_ipc test -v ./
 ```
 
-# Debug `go tool compile`
+### Debug `go tool compile`
 ```sh
 go install ./script/xgo.helper
 cp -r $GOROOT ~/GOROOT_DEBUG
@@ -127,7 +170,20 @@ cp -r $GOROOT ~/GOROOT_DEBUG
 xgo.helper setup-vscode ~/GOROOT_DEBUG
 
 # debug compile a specific package
-xgo.helper debug-compile ~/GOROOT_DEBUG golang.org/x/example/hello/reverse -C $PWD test -v -a ./
+xgo.helper debug-compile ~/GOROOT_DEBUG golang.org/x/example/hello/reverse test -v -a ./
+```
+
+### Debug `go tool compile` under xgo instrumented GOROOT
+```sh
+# output GOROOT
+go run -tags=dev ./cmd/xgo setup --with-goroot go-release/go1.24.2
+
+xgo.helper setup-vscode /Users/xhd2015/.xgo/go-instrument-dev/go1.24.2_Us_xh_Pr_xh_xg_go_go_dfa5d02c/go1.24.2
+
+go run -tags=dev ./cmd/xgo test --with-goroot go-release/go1.24.2 --debug-compile=golang.org/x/example/hello/reverse --project-dir test/debug/reverse -v -a ./
+
+# or
+go run ./script/run-test --include go1.24.2 -tags=dev --log-debug --debug-compile=github.com/xhd2015/xgo/runtime/test/build/debug --debug-xgo ./runtime/test/build/debug
 ```
 
 # Debug target

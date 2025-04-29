@@ -24,7 +24,8 @@ type options struct {
 
 	logCompile bool
 
-	logDebug     *string
+	logDebug *string
+	// --debug-compile, --debug-compile=x
 	debugCompile *string
 
 	debug *string
@@ -93,6 +94,13 @@ type options struct {
 	// this flag indicates the xgo is called from
 	// go command, so checks can be bypassed
 	goFlag bool
+	// --xgo-race-safe
+	// skip some functionalities that are not race-safe
+	xgoRaceSafe bool
+
+	// --unified
+	// use unified test mode
+	unified bool
 
 	remainArgs []string
 
@@ -153,6 +161,8 @@ func parseOptions(cmd string, args []string) (*options, error) {
 	var trapAll string
 	var trap []string
 
+	var unified bool
+
 	var remainArgs []string
 	var testArgs []string
 	var buildFlags []string
@@ -162,6 +172,7 @@ func parseOptions(cmd string, args []string) (*options, error) {
 
 	var deleteFlag bool
 	var goFlag bool
+	var xgoRaceSafe bool
 
 	nArg := len(args)
 
@@ -283,6 +294,13 @@ func parseOptions(cmd string, args []string) (*options, error) {
 				goFlag = true
 			},
 		},
+		{
+			Flags:  []string{"--xgo-race-safe"},
+			Single: true,
+			Set: func(v string) {
+				xgoRaceSafe = v == "" || v == "true"
+			},
+		},
 	}
 
 	if isDevelopment {
@@ -303,6 +321,19 @@ func parseOptions(cmd string, args []string) (*options, error) {
 
 	if cmd == "test" {
 		trapStdlib = true
+		flagValues = append(flagValues, FlagValue{
+			Flags:  []string{"--unified"},
+			Single: true,
+			Set: func(v string) {
+				if v == "" || v == "true" {
+					unified = true
+				} else if v == "false" {
+					unified = false
+				} else {
+					panic(fmt.Errorf("unrecognized value %s: %s, expects <empty>,true or false", "--unified", v))
+				}
+			},
+		})
 	}
 
 	for i := 0; i < nArg; i++ {
@@ -386,14 +417,14 @@ func parseOptions(cmd string, args []string) (*options, error) {
 			continue
 		}
 
-		if V1_0_0 {
+		if isDevelopment {
 			debugCompileVal, ok := tryParseOption("--debug-compile", args, &i)
 			if ok {
 				debugCompile = &debugCompileVal
 				continue
 			}
 		}
-		debugVal, ok := tryParseOption("--debug", args, &i)
+		debugVal, ok := tryParseEqSuffixValue("--debug", args[i])
 		if ok {
 			debug = &debugVal
 			continue
@@ -534,8 +565,8 @@ func parseOptions(cmd string, args []string) (*options, error) {
 		syncXgoOnly:   syncXgoOnly,
 		setupDev:      setupDev,
 		buildCompiler: buildCompiler,
-		// default true
-		syncWithLink: syncWithLink == nil || *syncWithLink,
+		// default false
+		syncWithLink: syncWithLink != nil && *syncWithLink,
 
 		mod:                             mod,
 		gcflags:                         gcflags,
@@ -549,6 +580,8 @@ func parseOptions(cmd string, args []string) (*options, error) {
 		trapAll:                         trapAll,
 		trap:                            trap,
 
+		unified: unified,
+
 		remainArgs:      remainArgs,
 		testArgs:        testArgs,
 		buildFlags:      buildFlags,
@@ -556,6 +589,7 @@ func parseOptions(cmd string, args []string) (*options, error) {
 		noLineDirective: noLineDirective,
 		deleteFlag:      deleteFlag,
 		goFlag:          goFlag,
+		xgoRaceSafe:     xgoRaceSafe,
 	}, nil
 }
 
@@ -598,11 +632,11 @@ func tryParseValue(flag string, args []string, i int, optional bool) (string, in
 	suffix := arg[len(flag):]
 	if suffix == "" {
 		if optional {
-			if i >= len(args) || strings.HasPrefix(args[i], "-") {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 				return "", i, true, nil
 			}
 		} else {
-			if i >= len(args) {
+			if i+1 >= len(args) {
 				return "", i, false, fmt.Errorf("%s: requires value", flag)
 			}
 		}
@@ -612,6 +646,20 @@ func tryParseValue(flag string, args []string, i int, optional bool) (string, in
 		return "", i, false, nil
 	}
 	return suffix[1:], i, true, nil
+}
+
+func tryParseEqSuffixValue(flag string, arg string) (string, bool) {
+	if !strings.HasPrefix(arg, flag) {
+		return "", false
+	}
+	suffix := arg[len(flag):]
+	if suffix == "" {
+		return "", true
+	}
+	if !strings.HasPrefix(suffix, "=") {
+		return "", false
+	}
+	return suffix[1:], true
 }
 
 func parseStackTraceFlag(arg string) (string, bool) {

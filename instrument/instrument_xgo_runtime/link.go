@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 
+	"github.com/xhd2015/xgo/instrument/config"
 	"github.com/xhd2015/xgo/instrument/constants"
 	"github.com/xhd2015/xgo/instrument/edit"
 	"github.com/xhd2015/xgo/instrument/instrument_func"
@@ -14,6 +15,7 @@ import (
 	"github.com/xhd2015/xgo/instrument/overlay"
 	"github.com/xhd2015/xgo/instrument/patch"
 	"github.com/xhd2015/xgo/support/goinfo"
+	"github.com/xhd2015/xgo/support/strutil"
 )
 
 var ErrLinkFileNotFound = errors.New("xgo: link file not found")
@@ -29,6 +31,7 @@ type LinkOptions struct {
 	XgoNumber           int
 	CollectTestTrace    bool
 	CollectTestTraceDir string
+	XgoRaceSafe         bool
 
 	ReadRuntimeGenFile func(path []string) ([]byte, error)
 }
@@ -42,6 +45,7 @@ func LinkXgoRuntime(goroot string, projectDir string, xgoRuntimeModuleDir string
 	xgoNumber := linkOpts.XgoNumber
 	collectTestTrace := linkOpts.CollectTestTrace
 	collectTestTraceDir := linkOpts.CollectTestTraceDir
+	xgoRaceSafe := linkOpts.XgoRaceSafe
 	readRuntimeGenFile := linkOpts.ReadRuntimeGenFile
 
 	var opts load.LoadOptions
@@ -86,53 +90,44 @@ func LinkXgoRuntime(goroot string, projectDir string, xgoRuntimeModuleDir string
 	var foundLegacyCoreInfoPkg bool
 	var traceFile *edit.File
 	var funcTabPkg *edit.Package
-	var coreVersion string
+	var runtimeCoreVersion string
 
 	// find version first
+	var corePkg *edit.Package
 	for _, pkg := range editPackages.Packages {
 		goPkg := pkg.LoadPackage.GoPackage
 		if goPkg.Incomplete {
 			continue
 		}
-		if goPkg.ImportPath != constants.RUNTIME_CORE_PKG {
-			continue
+		if goPkg.ImportPath == constants.RUNTIME_CORE_PKG {
+			corePkg = pkg
+			break
 		}
-		var versionFile *edit.File
-		for _, file := range pkg.Files {
+	}
+	var versionFile *edit.File
+	if corePkg != nil {
+		for _, file := range corePkg.Files {
 			if file.File.Name == constants.VERSION_FILE {
 				versionFile = file
 				break
 			}
 		}
-		if versionFile == nil {
-			break
-		}
+	}
+
+	if versionFile != nil {
 		content := versionFile.File.Content
 		absFile := overlay.AbsFile(versionFile.File.AbsPath)
 		var err error
-		coreVersion, err = ParseCoreVersion(content)
+		runtimeCoreVersion, err = ParseCoreVersion(strutil.ToReadonlyString(content))
 		if err != nil {
 			return nil, err
 		}
-		if isDeprecatedCoreVersion(coreVersion) {
-			return nil, fmt.Errorf("%w: %s", ErrRuntimeVersionDeprecatedV1_0_0, coreVersion)
+		if isDeprecatedCoreVersion(runtimeCoreVersion) {
+			return nil, fmt.Errorf("%w: %s", ErrRuntimeVersionDeprecatedV1_0_0, runtimeCoreVersion)
 		}
-		versionContent := ReplaceActualXgoVersion(content, xgoVersion, xgoRevision, xgoNumber)
-		if coreVersion == "1.1.0" || coreVersion == "1.1.1" {
-			// newer xgo can work with runtime v1.1.0/1.1.1/... with no trouble
-			// NOTE: how to decide bypass or not?
-			// you'd check the xgo/runtime code diff across these versions
-			// and find a way to migrate from old version to new version
-			// by instrumenting the code, which is basically enhancing
-			// the code here
-			// also add test under runtime/test/build
-			//  - runtime/test/build/legacy_depend_1_0_52
-			//  - runtime/test/build/legacy_depend_1_1_0
-			//  - runtime/test/build/legacy_depend_1_1_1
-			versionContent = bypassVersionCheck(versionContent)
-		}
+		versionContent := ReplaceActualXgoVersion(strutil.ToReadonlyString(content), xgoVersion, xgoRevision, xgoNumber)
+		versionContent = checkBypassVersionCheck(versionContent, runtimeCoreVersion)
 		overrideContent(absFile, versionContent)
-		break
 	}
 
 	for _, pkg := range editPackages.Packages {
@@ -180,7 +175,7 @@ func LinkXgoRuntime(goroot string, projectDir string, xgoRuntimeModuleDir string
 				}
 			}
 
-			err := linkRuntimeTemplates(goroot, overlayFS, pkg.LoadPackage.GoPackage.Dir, goVersion, coreVersion, runtimeLinkFile, readRuntimeGenFile, overrideContent)
+			err := linkRuntimeTemplates(goroot, overlayFS, pkg.LoadPackage.GoPackage.Dir, goVersion, runtimeCoreVersion, runtimeLinkFile, readRuntimeGenFile, overrideContent)
 			if err != nil {
 				return nil, err
 			}
@@ -192,8 +187,8 @@ func LinkXgoRuntime(goroot string, projectDir string, xgoRuntimeModuleDir string
 			absFile := overlay.AbsFile(loadFile.AbsPath)
 			switch loadFile.Name {
 			case constants.FLAG_FILE:
-				if suffixPkg == constants.RUNTIME_TRAP_FLAGS_PKG[n:] && collectTestTrace {
-					flagsContent := InjectFlags(content, collectTestTrace, collectTestTraceDir)
+				if suffixPkg == constants.RUNTIME_TRAP_FLAGS_PKG[n:] && (collectTestTrace || collectTestTraceDir != "" || xgoRaceSafe) {
+					flagsContent := InjectFlags(strutil.ToReadonlyString(content), collectTestTrace, collectTestTraceDir, xgoRaceSafe)
 					overrideContent(absFile, flagsContent)
 				}
 			case constants.TRACE_FILE:
@@ -212,7 +207,7 @@ func LinkXgoRuntime(goroot string, projectDir string, xgoRuntimeModuleDir string
 		}
 		return editPackages, ErrLinkFileNotRequired
 	}
-	if coreVersion == "1.1.0" && runtimeLinkPkg != nil {
+	if runtimeCoreVersion == "1.1.0" && runtimeLinkPkg != nil {
 		// remove the buggy var ptr trap behavior in runtime v1.1.0
 		dir := runtimeLinkPkg.LoadPackage.GoPackage.Dir
 		err := patchLegacy(dir, overrideContent)
@@ -223,7 +218,16 @@ func LinkXgoRuntime(goroot string, projectDir string, xgoRuntimeModuleDir string
 	if foundFunctabPkg && traceFile != nil {
 		// trap trace.go
 		edit := traceFile.Edit
-		funcInfos := instrument_func.TrapFuncs(edit, constants.RUNTIME_TRACE_PKG, traceFile.File.Syntax, traceFile.Index, instrument_func.Options{})
+		funcInfos, extraFuncs := instrument_func.TrapFuncs(edit, constants.RUNTIME_TRACE_PKG, traceFile.File.Syntax, traceFile.Index, instrument_func.Options{
+			// trap all funcs inside trace.go,
+			// in reality there is only one func: Trace
+			InstrumentMode: config.InstrumentMode_All,
+			// force in place edit, which uses overlay
+			ForceInPlace: true,
+		})
+		if len(extraFuncs) > 0 {
+			panic(fmt.Errorf("instrument %s.%s: unexpected extra compiler-assisted func: %d", constants.RUNTIME_TRACE_PKG, "Trace", len(extraFuncs)))
+		}
 		if edit.HasEdit() {
 			overrideContent(overlay.AbsFile(traceFile.File.AbsPath), edit.Buffer().String())
 		}

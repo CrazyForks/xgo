@@ -18,6 +18,7 @@ import (
 	"github.com/xhd2015/xgo/instrument/build"
 	"github.com/xhd2015/xgo/instrument/config"
 	"github.com/xhd2015/xgo/instrument/constants"
+	"github.com/xhd2015/xgo/instrument/instrument_go/instrument_gc"
 	"github.com/xhd2015/xgo/instrument/instrument_xgo_runtime"
 	"github.com/xhd2015/xgo/instrument/overlay"
 	cmd_support "github.com/xhd2015/xgo/support/cmd"
@@ -208,9 +209,11 @@ func handleBuild(cmd string, args []string) error {
 	trapStdlib := opts.trapStdlib
 	trapAll := opts.trapAll
 	trapPkgs := opts.trap
+	unified := opts.unified
 	noLineDirective := opts.noLineDirective
 	deleteFlag := opts.deleteFlag
 	goFlag := opts.goFlag
+	xgoRaceSafe := opts.xgoRaceSafe
 
 	if cmdExec && len(remainArgs) == 0 {
 		return fmt.Errorf("exec requires command")
@@ -504,6 +507,11 @@ func handleBuild(cmd string, args []string) error {
 			if err != nil {
 				return err
 			}
+			// re init
+			err = setupLocalXgoGenDir(localXgoGenDir)
+			if err != nil {
+				return err
+			}
 		}
 
 		resetOrRevisionChanged := resetInstrument || buildCompiler || coreRevisionChanged || instrumentedGorootNeedRecreate
@@ -522,8 +530,9 @@ func handleBuild(cmd string, args []string) error {
 			if cmdSetup && flagV {
 				fmt.Fprintf(os.Stderr, "patch GOROOT\n")
 			}
+
 			logDebug("patch runtime at: %s", instrumentGoroot)
-			err = patchRuntime(goroot, instrumentGoroot, realXgoSrc, goVersion, syncWithLink || setupDev || buildCompiler, resetOrRevisionChanged)
+			err = patchRuntime(goroot, instrumentGoroot, realXgoSrc, goVersion, isDevelopment || syncWithLink || setupDev || buildCompiler, resetOrRevisionChanged, isDevelopment)
 			if err != nil {
 				return err
 			}
@@ -594,7 +603,7 @@ func handleBuild(cmd string, args []string) error {
 	var buildDebug bool
 
 	var runFlagsAfterBuild []string
-	if debug != nil {
+	if debug != nil && *debug != "false" {
 		if cmdRun {
 			runDebug = true
 		} else if cmdTest {
@@ -617,6 +626,8 @@ func handleBuild(cmd string, args []string) error {
 
 	var execCmd *exec.Cmd
 	var logCmdExec func()
+
+	var instrumentUserCodeResult *instrumentResult
 	if !cmdExec {
 		if modfile != "" {
 			// make modfile absolute
@@ -742,9 +753,26 @@ xgo will try best to compile with newer xgo/runtime v%s, it's recommended to upg
 			collectTestTrace = true
 			collectTestTraceDir = stackTraceDir
 		}
-		err = instrumentUserCode(instrumentGoroot, projectDir, projectRoot, goVersion, realXgoSrc, modForLoad, modfileForLoad, mainModule, xgoRuntimeModuleDir, mayHaveCover, overlayFS, cmdTest, opts.FilterRules, trapPkgs, trapAll, collectTestTrace, collectTestTraceDir, goFlag, needUpgrade)
+		instrumentUserCodeResult, err = instrumentUserCode(instrumentGoroot, projectDir, projectRoot, goVersion, realXgoSrc, modForLoad, modfileForLoad, mainModule, xgoRuntimeModuleDir, mayHaveCover, overlayFS, cmdTest, opts.FilterRules, trapPkgs, trapAll, collectTestTrace, collectTestTraceDir, xgoRaceSafe, goFlag, needUpgrade)
 		if err != nil {
 			return err
+		}
+
+		// write compiler extra file
+		if instrumentUserCodeResult != nil && instrumentUserCodeResult.compilerExtra != nil && len(instrumentUserCodeResult.compilerExtra.Packages) > 0 {
+			absLocalGen, err := filepath.Abs(localXgoGenDir)
+			if err != nil {
+				return fmt.Errorf("make compiler extra file absolute: %w", err)
+			}
+			compilerExtraFile := filepath.Join(absLocalGen, "compiler_extra.json")
+			compilerExtraSumFile := filepath.Join(absLocalGen, "compiler_extra.sum.json")
+			err = writeCompilerExtra(instrumentUserCodeResult.compilerExtra, compilerExtraFile, compilerExtraSumFile)
+			if err != nil {
+				return err
+			}
+			execCmdEnv = append(execCmdEnv, exec_tool.XGO_COMPILER_SYNTAX_REWRITE_ENABLE+"=true")
+			execCmdEnv = append(execCmdEnv, exec_tool.XGO_COMPILER_SYNTAX_REWRITE_PACKAGES_FILE+"="+compilerExtraFile)
+			execCmdEnv = append(execCmdEnv, exec_tool.XGO_COMPILER_SYNTAX_REWRITE_PACKAGES_SUM_FILE+"="+compilerExtraSumFile)
 		}
 
 		if len(overlayFS) > 0 {
@@ -833,6 +861,12 @@ xgo will try best to compile with newer xgo/runtime v%s, it's recommended to upg
 			if testDebug {
 				buildCmdArgs = append(buildCmdArgs, "-c")
 			}
+		}
+		if debugCompilePkg != "" {
+			execCmdEnv = append(execCmdEnv, instrument_gc.XGO_HELPER_DEBUG_PKG+"="+debugCompilePkg)
+		}
+		if unified {
+			execCmdEnv = append(execCmdEnv, exec_tool.XGO_UNIFIEDTEST+"=true")
 		}
 
 		if cmdBuild || (cmdTest && flagC) || debugMode {

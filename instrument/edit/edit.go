@@ -8,6 +8,7 @@ import (
 	"github.com/xhd2015/xgo/instrument/load"
 	"github.com/xhd2015/xgo/instrument/resolve/types"
 	"github.com/xhd2015/xgo/support/edit/goedit"
+	"github.com/xhd2015/xgo/support/strutil"
 )
 
 type DeclKind int
@@ -76,8 +77,8 @@ type Package struct {
 
 	Collected bool
 
-	// Main indicates whether
-	// the package is within main module
+	// Main indicates the package is
+	// within the main module
 	// NOTE: this does not consider go.mod
 	// boundaries, it only consider the
 	// prefix of the package path.
@@ -179,7 +180,7 @@ func (c *Packages) Add(packages *load.Packages) {
 			files[j] = &File{
 				File:  file,
 				Index: j,
-				Edit:  goedit.New(packages.Fset, file.Content),
+				Edit:  goedit.New(packages.Fset, strutil.ToReadonlyString(file.Content)),
 			}
 		}
 		p := &Package{

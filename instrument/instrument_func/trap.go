@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	astutil "github.com/xhd2015/xgo/instrument/ast"
+	"github.com/xhd2015/xgo/instrument/compiler_extra"
 	"github.com/xhd2015/xgo/instrument/config"
 	"github.com/xhd2015/xgo/instrument/config/config_debug"
 	"github.com/xhd2015/xgo/instrument/constants"
@@ -23,9 +24,18 @@ const (
 )
 
 type Options struct {
-	PkgRecorder    *resolve.PkgRecorder
-	PkgConfig      *config.PkgConfig
-	DefaultDisable bool
+	PkgRecorder *resolve.PkgRecorder
+	PkgConfig   *config.PkgConfig
+
+	// flags
+	Main bool
+
+	InstrumentMode config.InstrumentMode
+
+	// force in place edit
+	ForceInPlace bool
+
+	PkgExtraQuota *int
 }
 
 // TrapFuncs parses the given file as golang AST,
@@ -43,14 +53,20 @@ type Options struct {
 //		func add(a, b int) int {defer runtime.XgoTrap()();
 //			return a+b
 //		}
-func TrapFuncs(editor *goedit.Edit, pkgPath string, file *ast.File, fileIndex int, opts Options) []*edit.FuncInfo {
+func TrapFuncs(editor *goedit.Edit, pkgPath string, file *ast.File, fileIndex int, opts Options) ([]*edit.FuncInfo, []*compiler_extra.Func) {
 	fset := editor.Fset()
 
 	recorder := opts.PkgRecorder
 	cfg := opts.PkgConfig
-	defaultDisable := opts.DefaultDisable
+	main := opts.Main
+	forceInPlace := opts.ForceInPlace
+	pkgQuota := opts.PkgExtraQuota
+
+	// --trap-all not effective for stdlib
+	instrumentMode := opts.InstrumentMode
 
 	var funcInfos []*edit.FuncInfo
+	var extraFuncs []*compiler_extra.Func
 	// Visit all decls in the AST
 	for _, decl := range file.Decls {
 		funcDecl, ok := decl.(*ast.FuncDecl)
@@ -68,7 +84,20 @@ func TrapFuncs(editor *goedit.Edit, pkgPath string, file *ast.File, fileIndex in
 			continue
 		}
 		if pkgPath == "time" && (funcName == constants.XGO_REAL_NOW || funcName == constants.XGO_REAL_SLEEP) {
-			// certain function is specifically left for xgo to call
+			// certain functions are specifically left for xgo to call
+			continue
+		}
+		var hasNosplit bool
+		if funcDecl.Doc != nil {
+			for _, comment := range funcDecl.Doc.List {
+				// see https://github.com/xhd2015/xgo/issues/340
+				if strings.HasPrefix(comment.Text, "//go:nosplit") {
+					hasNosplit = true
+					break
+				}
+			}
+		}
+		if hasNosplit {
 			continue
 		}
 		astReceiver := getReceiver(funcDecl, fset)
@@ -77,44 +106,88 @@ func TrapFuncs(editor *goedit.Edit, pkgPath string, file *ast.File, fileIndex in
 			config_debug.OnTrapFunc(pkgPath, funcDecl, identityName)
 		}
 
-		var hitRecorder bool
-		if recorder != nil {
-			var hasFnRecord bool
-			var hasTypeMethodRecord bool
-			fnRecorder := recorder.Get(funcName)
-			if fnRecorder != nil && fnRecorder.HasMockRef {
-				hasFnRecord = true
-			}
-			if !hasFnRecord && recvType != nil {
-				typeRecorder := recorder.Get(recvType.Name)
-				if typeRecorder != nil && typeRecorder.NamesHavingMock[funcName] {
-					hasTypeMethodRecord = true
+		if instrumentMode != config.InstrumentMode_All {
+			var hitRecorder bool
+			if recorder != nil {
+				var hasFnRecord bool
+				var hasTypeMethodRecord bool
+				fnRecorder := recorder.Get(funcName)
+				if fnRecorder != nil && fnRecorder.HasMockRef {
+					hasFnRecord = true
+				}
+				if !hasFnRecord && recvType != nil {
+					typeRecorder := recorder.Get(recvType.Name)
+					if typeRecorder != nil && typeRecorder.NamesHavingMock[funcName] {
+						hasTypeMethodRecord = true
+					}
+				}
+				if hasFnRecord || hasTypeMethodRecord {
+					hitRecorder = true
 				}
 			}
-			if hasFnRecord || hasTypeMethodRecord {
-				hitRecorder = true
-			}
-		}
-		if !hitRecorder {
-			// if not hit recorder, we fallback to cfg-based filter
-			// which is whitelist mode for stdlib
-			if cfg != nil {
-				if !cfg.WhitelistFunc[identityName] && !matchAnyPrefix(cfg.WhitelistFuncPrefix, identityName) {
-					// TODO: may enforce only exporeted function on standard lib?
+
+			if !hitRecorder {
+				// if not hit recorder, we fallback to cfg-based filter
+				// which is whitelist mode for stdlib
+				if cfg != nil {
+					if !cfg.WhitelistFunc[identityName] && !matchAnyPrefix(cfg.WhitelistFuncPrefix, identityName) {
+						// TODO: may enforce only exporeted function on standard lib?
+						continue
+					}
+				} else if instrumentMode == config.InstrumentMode_None {
+					// by default, we don't instrument stdlib and third party packages
+					continue
+				} else if instrumentMode == config.InstrumentMode_Exported {
+					if !token.IsExported(funcName) {
+						continue
+					}
+				} else {
+					// unknown
+					if config.IS_DEV {
+						panic(fmt.Sprintf("unhandled instrument mode: %d", instrumentMode))
+					}
 					continue
 				}
-			} else if defaultDisable {
-				// by default, we don't instrument stdlib
-				continue
 			}
 		}
+
+		if !main && !forceInPlace {
+			// for non-main packages, we let compiler to insert
+			// trap to avoid excessive compile time
+			// see
+			//  - https://github.com/xhd2015/xgo/issues/333
+			//  - https://github.com/xhd2015/xgo/issues/335
+			// take the first 100, see
+			//  - https://github.com/xhd2015/xgo/issues/333#issuecomment-2830937257
+			var addExtra bool
+			if instrumentMode == config.InstrumentMode_All {
+				addExtra = true
+			} else if len(extraFuncs) < config.MAX_EXTRA_FUNCS_PER_FILE {
+				if pkgQuota != nil {
+					n := *pkgQuota
+					if n <= 0 {
+						continue
+					}
+					*pkgQuota = n - 1
+				}
+				addExtra = true
+			}
+			if addExtra {
+				extraFuncs = append(extraFuncs, &compiler_extra.Func{
+					IdentityName: identityName,
+				})
+			}
+			continue
+		}
+		// for mainOrInitial, edit file in place
+		// for non
 
 		_, receiver := processReceiverNames(funcDecl, fset, editor)
 		_, receiverAddr := toNameAddr(receiver)
 		// Process parameter names
-		_, paramFields := processParamNames(funcDecl, fset, editor)
+		_, paramFields := processParamNames(funcDecl, editor)
 
-		_, resultFields := processResultNames(funcDecl, fset, editor)
+		_, resultFields := processResultNames(funcDecl, editor)
 
 		_, paramAddrs := toNameAddrs(paramFields)
 		_, resultAddrs := toNameAddrs(resultFields)
@@ -156,11 +229,7 @@ func TrapFuncs(editor *goedit.Edit, pkgPath string, file *ast.File, fileIndex in
 			Results:      resultFields,
 		})
 	}
-
-	if len(funcInfos) == 0 {
-		return nil
-	}
-	return funcInfos
+	return funcInfos, extraFuncs
 }
 
 func ParseReceiverInfo(fnName string, receiver *ast.Field) (identityName string, recvPtr bool, recvGeneric bool, recvType *ast.Ident) {
@@ -212,7 +281,7 @@ func getReceiver(funcDecl *ast.FuncDecl, fset *token.FileSet) *ast.Field {
 // adding names to unnamed receivers or replacing "_" receivers with unique names.
 // Returns true if any receiver names were amended.
 func processReceiverNames(funcDecl *ast.FuncDecl, fset *token.FileSet, editor *goedit.Edit) (bool, *edit.Field) {
-	modified, fieldNames := processFieldNames(funcDecl.Recv, recvNamePrefix, editor, fset, false, funcDecl)
+	modified, fieldNames := processFieldNames(funcDecl.Recv, recvNamePrefix, editor, false, funcDecl)
 	if len(fieldNames) == 0 {
 		return false, nil
 	}
@@ -225,19 +294,19 @@ func processReceiverNames(funcDecl *ast.FuncDecl, fset *token.FileSet, editor *g
 }
 
 // processParamNames processes a function declaration's parameter list using the common processFieldNames function.
-func processParamNames(funcDecl *ast.FuncDecl, fset *token.FileSet, editor *goedit.Edit) (modified bool, paramNames []*edit.Field) {
-	return processFieldNames(funcDecl.Type.Params, paramNamePrefix, editor, fset, false, funcDecl)
+func processParamNames(funcDecl *ast.FuncDecl, editor *goedit.Edit) (modified bool, paramNames []*edit.Field) {
+	return processFieldNames(funcDecl.Type.Params, paramNamePrefix, editor, false, funcDecl)
 }
 
 // processResultNames processes a function declaration's result list using the common processFieldNames function.
-func processResultNames(funcDecl *ast.FuncDecl, fset *token.FileSet, editor *goedit.Edit) (modified bool, resultNames []*edit.Field) {
-	return processFieldNames(funcDecl.Type.Results, resultNamePrefix, editor, fset, true, funcDecl)
+func processResultNames(funcDecl *ast.FuncDecl, editor *goedit.Edit) (modified bool, resultNames []*edit.Field) {
+	return processFieldNames(funcDecl.Type.Results, resultNamePrefix, editor, true, funcDecl)
 }
 
 // processFieldNames is a common function for processing parameter or result names.
 // It adds names to unnamed fields or replaces "_" fields with unique names.
 // Returns true if any field names were modified and the list of field names.
-func processFieldNames(fieldList *ast.FieldList, namePrefix string, editor *goedit.Edit, fset *token.FileSet, isResult bool, funcDecl *ast.FuncDecl) (modified bool, fieldNames []*edit.Field) {
+func processFieldNames(fieldList *ast.FieldList, namePrefix string, editor *goedit.Edit, isResult bool, funcDecl *ast.FuncDecl) (modified bool, fieldNames []*edit.Field) {
 	// No fields
 	if fieldList == nil || len(fieldList.List) == 0 {
 		return false, nil

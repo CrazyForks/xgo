@@ -30,7 +30,7 @@ func CollectDecls(pkg *edit.Package) {
 			switch decl := decl.(type) {
 			case *ast.GenDecl:
 				switch decl.Tok {
-				case token.VAR:
+				case token.VAR, token.CONST:
 					for _, spec := range decl.Specs {
 						switch spec := spec.(type) {
 						case *ast.ValueSpec:
@@ -42,8 +42,12 @@ func CollectDecls(pkg *edit.Package) {
 								if i < len(spec.Values) {
 									value = spec.Values[i]
 								}
+								kind := edit.DeclKindVar
+								if decl.Tok == token.CONST {
+									kind = edit.DeclKindConst
+								}
 								fileDecls = append(fileDecls, &edit.Decl{
-									Kind:  edit.DeclKindVar,
+									Kind:  kind,
 									Ident: name,
 									Type:  spec.Type,
 									Value: value,
@@ -53,8 +57,6 @@ func CollectDecls(pkg *edit.Package) {
 							}
 						}
 					}
-				case token.CONST:
-					// TODO
 				case token.TYPE:
 					// type Some...
 					for _, spec := range decl.Specs {
@@ -191,6 +193,6 @@ func traverseFuncDecls(global *GlobalScope, pkg *edit.Package, file *edit.File) 
 		if config.DEBUG {
 			config_debug.OnTraverseFuncDecl(pkg, file, fnDecl)
 		}
-		fileScope.traverseFunc(fnDecl.Recv, fnDecl.Type, fnDecl.Body)
+		fileScope.traverseFunc(fnDecl.Recv, fnDecl.Name.Name, fnDecl.Type, fnDecl.Body)
 	}
 }

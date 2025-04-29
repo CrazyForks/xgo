@@ -11,6 +11,7 @@ import (
 	"github.com/xhd2015/xgo/instrument/load"
 	"github.com/xhd2015/xgo/instrument/overlay"
 	"github.com/xhd2015/xgo/instrument/patch"
+	"github.com/xhd2015/xgo/support/strutil"
 )
 
 func CheckRuntimeLegacyVersion(projectDir string, overlayFS overlay.Overlay, mod string, modfile string) (bool, string, error) {
@@ -46,7 +47,7 @@ func CheckRuntimeLegacyVersion(projectDir string, overlayFS overlay.Overlay, mod
 	if foundFile == nil {
 		return false, "", nil
 	}
-	coreVersion, err := ParseCoreVersion(foundFile.Content)
+	coreVersion, err := ParseCoreVersion(strutil.ToReadonlyString(foundFile.Content))
 	if err != nil {
 		return false, "", err
 	}
@@ -99,9 +100,10 @@ func ParseCoreVersion(versionCode string) (string, error) {
 	return ver, nil
 }
 
-func InjectFlags(flagsCode string, collectTestTrace bool, collectTestTraceDir string) string {
+func InjectFlags(flagsCode string, collectTestTrace bool, collectTestTraceDir string, xgoRaceSafe bool) string {
 	flagsCode = replaceByLine(flagsCode, `const COLLECT_TEST_TRACE = `, fmt.Sprintf(`const COLLECT_TEST_TRACE = %t`, collectTestTrace))
 	flagsCode = replaceByLine(flagsCode, `const COLLECT_TEST_TRACE_DIR = `, fmt.Sprintf(`const COLLECT_TEST_TRACE_DIR = %q`, collectTestTraceDir))
+	flagsCode = replaceByLine(flagsCode, `const XGO_RACE_SAFE = `, fmt.Sprintf(`const XGO_RACE_SAFE = %t`, xgoRaceSafe))
 	return flagsCode
 }
 

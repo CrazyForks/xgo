@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -12,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xhd2015/xgo/instrument/compiler_extra"
 	"github.com/xhd2015/xgo/instrument/config"
 	"github.com/xhd2015/xgo/instrument/constants"
 	"github.com/xhd2015/xgo/instrument/edit"
@@ -39,14 +43,18 @@ import (
 // known for: go1.19
 const MAX_FILE_SIZE = 1 * 1024 * 1024
 
+type instrumentResult struct {
+	compilerExtra *compiler_extra.Packages
+}
+
 // goroot is critical for stdlib
-func instrumentUserCode(goroot string, projectDir string, projectRoot string, goVersion *goinfo.GoVersion, xgoSrc string, mod string, modfile string, mainModule string, xgoRuntimeModuleDir string, mayHaveCover bool, overlayFS overlay.Overlay, includeTest bool, rules []Rule, trapPkgs []string, trapAll string, collectTestTrace bool, collectTestTraceDir string, goFlag bool, triedUpgrade bool) error {
+func instrumentUserCode(goroot string, projectDir string, projectRoot string, goVersion *goinfo.GoVersion, xgoSrc string, mod string, modfile string, mainModule string, xgoRuntimeModuleDir string, mayHaveCover bool, overlayFS overlay.Overlay, includeTest bool, rules []Rule, trapPkgs []string, trapAll string, collectTestTrace bool, collectTestTraceDir string, xgoRaceSafe bool, goFlag bool, triedUpgrade bool) (*instrumentResult, error) {
 	logDebug("instrumentUserSpace: mod=%s, modfile=%s, xgoRuntimeModuleDir=%s, includeTest=%v, collectTestTrace=%v", mod, modfile, xgoRuntimeModuleDir, includeTest, collectTestTrace)
 	if mod == "" {
 		// check vendor dir
 		vendorDir, err := getVendorDir(projectRoot)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if vendorDir != "" {
 			mod = "vendor"
@@ -75,13 +83,14 @@ func instrumentUserCode(goroot string, projectDir string, projectRoot string, go
 		XgoNumber:           NUMBER,
 		CollectTestTrace:    collectTestTrace,
 		CollectTestTraceDir: collectTestTraceDir,
+		XgoRaceSafe:         xgoRaceSafe,
 		ReadRuntimeGenFile: func(path []string) ([]byte, error) {
 			return readRuntimeGenFile(xgoSrc, path)
 		},
 	})
 	if err != nil {
 		if err == instrument_xgo_runtime.ErrLinkFileNotRequired {
-			return nil
+			return nil, nil
 		}
 		if err == instrument_xgo_runtime.ErrLinkFileNotFound {
 			if !goFlag {
@@ -90,28 +99,28 @@ func instrumentUserCode(goroot string, projectDir string, projectRoot string, go
   import _ %q
 	`, constants.RUNTIME_INTERNAL_TRAP_PKG, constants.RUNTIME_INTERNAL_TRAP_PKG)
 			}
-			return nil
+			return nil, nil
 		}
 		if errors.Is(err, instrument_xgo_runtime.ErrRuntimeVersionDeprecatedV1_0_0) {
 			if !goFlag {
 				if triedUpgrade {
-					return fmt.Errorf("xgo v%s auto upgrade failed, you can fix this by:\n  go get %s@latest", VERSION, constants.RUNTIME_MODULE)
+					return nil, fmt.Errorf("xgo v%s auto upgrade failed, you can fix this by:\n  go get %s@latest", VERSION, constants.RUNTIME_MODULE)
 				}
-				return fmt.Errorf("xgo v%s cannot work with deprecated xgo/runtime: %w, upgrade with:\n  go get %s@latest", VERSION, err, constants.RUNTIME_MODULE)
+				return nil, fmt.Errorf("xgo v%s cannot work with deprecated xgo/runtime: %w, upgrade with:\n  go get %s@latest", VERSION, err, constants.RUNTIME_MODULE)
 			}
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	funcTabPkg := xgoPkgs.PackageByPath[constants.RUNTIME_FUNCTAB_PKG]
 	if funcTabPkg == nil || !hasFunc(funcTabPkg, constants.RUNTIME_FUNCTAB_REGISTER) {
 		logDebug("skip functab registering")
-		return nil
+		return nil, nil
 	}
 
 	includeMain, loadPkgs, err := getLoadPackages(rules)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logDebug("loadPkgs: includeMain=%v loadPkgs=%v", includeMain, loadPkgs)
 	var loadArgs []string
@@ -141,7 +150,7 @@ func instrumentUserCode(goroot string, projectDir string, projectRoot string, go
 	logDebug("start load: %v", loadArgs)
 	loadPackages, err := load.LoadPackages(loadArgs, pkgs.LoadOptions)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pkgs.Add(loadPackages)
 	// remove deps flag
@@ -199,49 +208,101 @@ func instrumentUserCode(goroot string, projectDir string, projectRoot string, go
 	var recorder resolve.Recorder
 	err = resolve.Traverse(reg, mainPkgs, &recorder)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logDebug("traverse: cost=%v", time.Since(traverseBegin))
 
 	logDebug("start instrumentVarTrap: len(mainPkgs)=%d", len(mainPkgs))
 	err = instrument_var.TrapVariables(pkgs, &recorder)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// ""->default
 	needTrapAll := trapAll == "true" || (trapAll == "" && recorder.HasTrapInterceptorRef)
 
 	logDebug("start instrumentFuncTrap: len(packages)=%d, needTrapAll=%v", len(pkgs.Packages), needTrapAll)
+	var extraPkgs []*compiler_extra.Package
 	for _, pkg := range pkgs.Packages {
 		if !pkg.AllowInstrument {
 			continue
 		}
 		pkgPath := pkg.LoadPackage.GoPackage.ImportPath
 		cfg := config.GetPkgConfig(pkgPath)
-		var defaultAllow bool
-		if !pkg.LoadPackage.GoPackage.Standard {
-			if needTrapAll || pkg.Initial {
-				defaultAllow = true
-			}
+		stdlib := pkg.LoadPackage.GoPackage.Standard
+		main := pkg.Main
+		initial := pkg.Initial
+		pkgRecorder := recorder.GetOrInit(pkgPath)
+
+		var hasVarTrap bool
+		if pkgRecorder != nil && pkgRecorder.NumVars > 0 {
+			hasVarTrap = true
 		}
+
+		mode := config.CheckInstrumentMode(stdlib, main, initial, needTrapAll)
+
+		var extraFiles []*compiler_extra.File
+		pkgExtraQuota := config.MAX_EXTRA_FUNCS_PER_PKG
 		for _, file := range pkg.Files {
 			if !pkg.Main && strings.HasSuffix(file.File.Name, "_test.go") {
 				// skip test files outside main package
 				continue
 			}
-			funcs := instrument_func.TrapFuncs(file.Edit, pkgPath, file.File.Syntax, file.Index, instrument_func.Options{
-				PkgRecorder:    recorder.Pkgs[pkgPath],
+			funcs, extraFuncs := instrument_func.TrapFuncs(file.Edit, pkgPath, file.File.Syntax, file.Index, instrument_func.Options{
+				PkgRecorder:    pkgRecorder,
 				PkgConfig:      cfg,
-				DefaultDisable: !defaultAllow,
+				Main:           main,
+				InstrumentMode: mode,
+				PkgExtraQuota:  &pkgExtraQuota,
 			})
 			file.TrapFuncs = append(file.TrapFuncs, funcs...)
 
 			// interface types
-			intfTypes := instrument_intf.CollectInterfaces(file)
-			file.InterfaceTypes = append(file.InterfaceTypes, intfTypes...)
+			var extraInterfaces []*compiler_extra.Interface
+			if mode != config.InstrumentMode_None {
+				intfTypes := instrument_intf.CollectInterfaces(file)
+				if main {
+					file.InterfaceTypes = append(file.InterfaceTypes, intfTypes...)
+				} else {
+					for _, intf := range intfTypes {
+						if mode == config.InstrumentMode_All {
+							// pass
+						} else if mode == config.InstrumentMode_Exported {
+							if !token.IsExported(intf.Name) {
+								continue
+							}
+						} else {
+							if config.IS_DEV {
+								panic(fmt.Sprintf("unhandled instrument mode: %d", mode))
+							}
+						}
+						extraInterfaces = append(extraInterfaces, &compiler_extra.Interface{
+							Name: intf.Name,
+						})
+					}
+				}
+			}
+
+			if len(extraFuncs) > 0 || len(extraInterfaces) > 0 {
+				extraFiles = append(extraFiles, &compiler_extra.File{
+					Name:       file.File.Name,
+					AbsFile:    file.File.AbsPath,
+					Funcs:      extraFuncs,
+					Interfaces: extraInterfaces,
+				})
+			}
+		}
+		if len(extraFiles) > 0 {
+			md5sum := md5sumTraps(extraFiles, hasVarTrap)
+			extraPkgs = append(extraPkgs, &compiler_extra.Package{
+				Path:       pkg.LoadPackage.GoPackage.ImportPath,
+				Files:      extraFiles,
+				HasVarTrap: hasVarTrap,
+				TrapMD5Sum: md5sum,
+			})
 		}
 	}
+	logDebug("extraPkgs: %d", len(extraPkgs))
 
 	logDebug("generate functab register")
 	registerFuncTab(pkgs)
@@ -249,10 +310,39 @@ func instrumentUserCode(goroot string, projectDir string, projectRoot string, go
 	logDebug("collect edits")
 	updatedFiles, err := applyInstrumentWithEditNotes(overlayFS, pkgs, mayHaveCover, overrideXgoContent)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	var compilerExtra *compiler_extra.Packages
+	if len(extraPkgs) > 0 {
+		compilerExtra = &compiler_extra.Packages{
+			Packages: extraPkgs,
+		}
 	}
 	logDebug("finish instruments, updated %d files", updatedFiles)
-	return nil
+	return &instrumentResult{
+		compilerExtra: compilerExtra,
+	}, nil
+}
+
+func md5sumTraps(files []*compiler_extra.File, hasVarTrap bool) string {
+	h := md5.New()
+	for _, file := range files {
+		// assume files are stable
+		io.WriteString(h, file.Name)
+		for _, fn := range file.Funcs {
+			io.WriteString(h, fn.IdentityName)
+		}
+		for _, intf := range file.Interfaces {
+			io.WriteString(h, intf.Name)
+		}
+	}
+	var v string = "v:0"
+	if hasVarTrap {
+		v = "v:1"
+	}
+	io.WriteString(h, v)
+	md5 := h.Sum(nil)
+	return hex.EncodeToString(md5[:])
 }
 
 func registerFuncTab(packages *edit.Packages) {
@@ -276,7 +366,7 @@ func applyInstrumentWithEditNotes(overlayFS overlay.Overlay, packages *edit.Pack
 			content := string(file.Edit.Buffer().Bytes())
 			if mayHaveCover {
 				var err error
-				content, err = instrument_go.AddEditsNotes(file.Edit, file.File.AbsPath, file.File.Content, content)
+				content, err = instrument_go.AddEditsNotes(file.Edit, file.File.AbsPath, strutil.ToReadonlyString(file.File.Content), content)
 				if err != nil {
 					return 0, fmt.Errorf("failed to add edits: %s %w", file.File.AbsPath, err)
 				}
@@ -391,40 +481,52 @@ func splitCommaList(s string) []string {
 	return trimmedList
 }
 
+func setupLocalXgoGenDir(xgoGenDir string) error {
+	// to avoid `go mod vendor` detecting this gen dir
+	xgoGenGoMod := filepath.Join(xgoGenDir, "go.mod")
+	stat, statErr := os.Stat(xgoGenGoMod)
+	if statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return statErr
+		}
+	} else {
+		if !stat.IsDir() {
+			return nil
+		}
+		err := os.RemoveAll(xgoGenGoMod)
+		if err != nil {
+			return err
+		}
+	}
+
+	err := os.MkdirAll(xgoGenDir, 0755)
+	if err != nil {
+		return err
+	}
+
+	err = os.WriteFile(xgoGenGoMod, []byte(strings.Join([]string{
+		"// a dummy go.mod generated by xgo to avoid affecting `go mod tidy` and `go mod vendor`",
+		"module github.com/xhd2015/xgo/gen",
+		"",
+		"go 1.18",
+		"",
+	}, "\n")), 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func getLocalXgoGenDir(projectRootDir string) (string, error) {
 	xgoDir, err := getLocalXgoDir(projectRootDir)
 	if err != nil {
 		return "", err
 	}
 	xgoGenDir := filepath.Join(xgoDir, "gen")
-
-	// to avoid `go mod vendor` detecting this gen dir
-	xgoGenGoMod := filepath.Join(xgoGenDir, "go.mod")
-	stat, statErr := os.Stat(xgoGenGoMod)
-	if statErr != nil {
-		if !os.IsNotExist(statErr) {
-			return "", statErr
-		}
-	} else {
-		if !stat.IsDir() {
-			return xgoGenDir, nil
-		}
-		err = os.RemoveAll(xgoGenGoMod)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	err = os.MkdirAll(xgoGenDir, 0755)
+	err = setupLocalXgoGenDir(xgoGenDir)
 	if err != nil {
 		return "", err
 	}
-
-	err = os.WriteFile(xgoGenGoMod, []byte("// empty go.mod generated by xgo to avoid affecting `go mod tidy` and `go mod vendor`\n"), 0644)
-	if err != nil {
-		return "", err
-	}
-
 	return xgoGenDir, nil
 }
 
@@ -515,4 +617,28 @@ func humanReadablePath(path string) string {
 		return path
 	}
 	return rel
+}
+
+func writeCompilerExtra(compilerExtra *compiler_extra.Packages, compilerExtraFile string, compilerExtraSumFile string) error {
+	mapping := compilerExtra.BuildMapping()
+	extraData, err := json.Marshal(mapping)
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(compilerExtraFile, extraData, 0755)
+	if err != nil {
+		return fmt.Errorf("write compiler extra file: %w", err)
+	}
+
+	// pkg->sum
+	md5sumMapping := compilerExtra.BuildMD5SumMapping()
+	sumData, err := json.Marshal(md5sumMapping)
+	if err != nil {
+		return fmt.Errorf("write compiler extra sum file: %w", err)
+	}
+	err = os.WriteFile(compilerExtraSumFile, sumData, 0755)
+	if err != nil {
+		return fmt.Errorf("write compiler extra sum file: %w", err)
+	}
+	return nil
 }
